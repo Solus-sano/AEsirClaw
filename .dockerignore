@@ -1,0 +1,29 @@
+# VCS
+.git
+.gitignore
+
+# Python caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+wheels/
+
+# Virtual env
+.venv/
+venv/
+
+# Runtime/generated data
+logs/
+workspace/
+data/
+agent_core/memory/summaries/
+
+# Tests and docs (若镜像运行时不需要可排除)
+test/
+note/
+
+# IDE
+.vscode/
+.cursor/

@@ -1,0 +1,16 @@
+[project]
+name = "aesirclaw"
+version = "0.1.0"
+description = "A persona-driven AI Agent for QQ, with sandboxed code execution and extensible skills."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.3",
+    "ddgs>=9.10.0",
+    "ipdb>=0.13.13",
+    "mcp>=1.26.0",
+    "ncatbot>=4.4.1.post1",
+    "openai>=2.15.0",
+    "pillow>=12.1.0",
+    "python-frontmatter>=1.1.0",
+]

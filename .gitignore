@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# logs
+logs/
+
+# tmp data
+data/
+workspace/
+agent_core/memory/summaries/
+note/
+
+# security
+config/bot.yaml
+config.yaml
