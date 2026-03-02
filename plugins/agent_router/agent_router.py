@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import traceback
+from pathlib import Path
+from typing import Any
+
+import yaml
 
 from ncatbot.core.event import GroupMessageEvent, PrivateMessageEvent
 from ncatbot.plugin_system import NcatBotPlugin, filter_registry
@@ -33,14 +37,11 @@ class AgentRouterPlugin(NcatBotPlugin):
     version = "0.2.0"
 
     async def on_load(self):
-        cfg = AppConfig()
-        cfg.load_persona("personal_OPCI_firefly.yaml")
+        self.cfg = AppConfig()
 
-        bot_cfg = cfg.bot
-        memory_cfg = cfg.memory
-        trigger_cfg = cfg.trigger
-        llm_cfg = cfg.llm
-        cfg._persona["QQ_ID"] = bot_cfg.get("bot_qq", "")
+        bot_cfg = self.cfg.bot
+        memory_cfg = self.cfg.memory
+        llm_cfg = self.cfg.llm
 
         self.group_whitelist = bot_cfg.get("group_whitelist", DEFAULT_GROUP_WHITELIST)
         self.private_whitelist = bot_cfg.get("private_whitelist", [])
@@ -54,51 +55,18 @@ class AgentRouterPlugin(NcatBotPlugin):
             max_size=int(memory_cfg.get("short_term_queue_size", 200)),
         )
 
-        llm = LLMClient(cfg)
-
-        outputter = MessageOutputter(
-            api=self.api,
-            typing_delay_per_char=float(cfg.output.get("typing_delay_per_char", 0.05)),
-            random_delay_range=tuple(cfg.output.get("random_delay_range", [0.5, 2.0])),
-            max_delay=float(cfg.output.get("max_delay", 5.0)),
-        )
-
-        bot_name = cfg.persona.get("core", {}).get("name", "Bot")
-        mcp = create_mcp_server(
-            outputter=outputter,
-            bot_api=self.api,
-            memory=self.memory,
-            bot_name=bot_name,
-            executor=DockerExecutor(),
-        )
-
-        controller = AgentController(
-            llm=llm,
-            mcp=mcp,
-            max_iterations=int(llm_cfg.get("max_iterations", 10)),
-        )
-
-        trigger = TriggerManager(
-            bot_qq=self.bot_qq,
-            keywords=trigger_cfg.get("keywords", []),
-            group_cooldown_seconds=float(trigger_cfg.get("group_cooldown_seconds", 30.0)),
-            private_cooldown_seconds=float(trigger_cfg.get("private_cooldown_seconds", 10.0)),
-        )
-
-        long_term_memory = LongTermMemory(
-            llm,
+        self.llm = LLMClient(self.cfg)
+        self.long_term_memory = LongTermMemory(
+            self.llm,
             storage_dir=memory_cfg.get("summaries_dir", "memory/summaries"),
         )
+        self.max_iterations = int(llm_cfg.get("max_iterations", 10))
+        self.context_short_term_messages = int(memory_cfg.get("context_short_term_messages", 100))
+        self.extraction_threshold = int(memory_cfg.get("extraction_threshold", 200))
+        self.executor = DockerExecutor()
 
-        self.pipeline = MessagePipeline(
-            controller=controller,
-            memory=self.memory,
-            trigger=trigger,
-            long_term_memory=long_term_memory,
-            persona=cfg.persona,
-            context_short_term_messages=int(memory_cfg.get("context_short_term_messages", 100)),
-            extraction_threshold=int(memory_cfg.get("extraction_threshold", 200)),
-        )
+        self._load_routing_config()
+        self._pipeline_cache: dict[str, MessagePipeline] = {}
 
         self.debouncer = Debouncer(delay=5.0)
 
@@ -196,9 +164,125 @@ class AgentRouterPlugin(NcatBotPlugin):
 
     async def _safe_handle(self, context_id: str, **kwargs) -> None:
         try:
-            await self.pipeline.handle(context_id, **kwargs)
+            pipeline = self._get_pipeline(context_id)
+            await pipeline.handle(context_id, **kwargs)
         except Exception as exc:
             LOG.error("处理消息失败 [%s]: %s\n%s", context_id, exc, traceback.format_exc())
+
+    def _load_routing_config(self) -> None:
+        raw_bot = getattr(self.cfg, "_bot", {})
+        routing_cfg = raw_bot.get("routing", {})
+        defaults_cfg = routing_cfg.get("defaults", {})
+
+        self.default_persona_file = str(defaults_cfg.get("persona_file", "personal_xlpj.yaml"))
+        trigger_cfg = defaults_cfg.get("trigger", {})
+        output_cfg = defaults_cfg.get("output", {})
+        self.default_trigger_cfg = trigger_cfg if isinstance(trigger_cfg, dict) else {}
+        self.default_output_cfg = output_cfg if isinstance(output_cfg, dict) else {}
+
+        groups = routing_cfg.get("groups", {})
+        users = routing_cfg.get("users", {})
+        self.group_overrides = groups if isinstance(groups, dict) else {}
+        self.user_overrides = users if isinstance(users, dict) else {}
+
+    @staticmethod
+    def _merge_dict(base: dict | None, override: dict | None) -> dict:
+        merged = dict(base or {})
+        if isinstance(override, dict):
+            merged.update(override)
+        return merged
+
+    @staticmethod
+    def _to_delay_range(value: Any) -> tuple[float, float]:
+        if isinstance(value, (list, tuple)) and len(value) == 2:
+            return float(value[0]), float(value[1])
+        return (0.5, 2.0)
+
+    def _resolve_context_config(self, context_id: str) -> dict[str, Any]:
+        override: dict[str, Any] = {}
+        if context_id.startswith("group:"):
+            group_id = context_id.removeprefix("group:")
+            cand = self.group_overrides.get(group_id, {})
+            if isinstance(cand, dict):
+                override = cand
+        elif context_id.startswith("private:"):
+            user_id = context_id.removeprefix("private:")
+            cand = self.user_overrides.get(user_id, {})
+            if isinstance(cand, dict):
+                override = cand
+
+        return {
+            "persona_file": str(override.get("persona_file", self.default_persona_file)),
+            "trigger": self._merge_dict(self.default_trigger_cfg, override.get("trigger")),
+            "output": self._merge_dict(self.default_output_cfg, override.get("output")),
+        }
+
+    def _load_persona_file(self, persona_file: str) -> dict:
+        path = self.cfg.config_dir / persona_file
+        if not path.exists():
+            LOG.warning("人格文件不存在，使用空人格: %s", persona_file)
+            persona = {}
+        else:
+            persona = self._read_yaml(path)
+        persona["QQ_ID"] = self.bot_qq
+        return persona
+
+    @staticmethod
+    def _read_yaml(path: Path) -> dict:
+        with path.open("r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+
+    def _get_pipeline(self, context_id: str) -> MessagePipeline:
+        cached = self._pipeline_cache.get(context_id)
+        if cached is not None:
+            return cached
+
+        resolved = self._resolve_context_config(context_id)
+        persona = self._load_persona_file(resolved["persona_file"])
+        output_cfg = resolved["output"]
+        trigger_cfg = resolved["trigger"]
+
+        outputter = MessageOutputter(
+            api=self.api,
+            typing_delay_per_char=float(output_cfg.get("typing_delay_per_char", 0.05)),
+            random_delay_range=self._to_delay_range(output_cfg.get("random_delay_range", [0.5, 2.0])),
+            max_delay=float(output_cfg.get("max_delay", 5.0)),
+        )
+
+        bot_name = persona.get("core", {}).get("name", "Bot")
+        mcp = create_mcp_server(
+            outputter=outputter,
+            bot_api=self.api,
+            memory=self.memory,
+            bot_name=bot_name,
+            executor=self.executor,
+        )
+
+        controller = AgentController(
+            llm=self.llm,
+            mcp=mcp,
+            max_iterations=self.max_iterations,
+        )
+
+        trigger = TriggerManager(
+            bot_qq=self.bot_qq,
+            keywords=trigger_cfg.get("keywords", []),
+            group_cooldown_seconds=float(trigger_cfg.get("group_cooldown_seconds", 30.0)),
+            private_cooldown_seconds=float(trigger_cfg.get("private_cooldown_seconds", 10.0)),
+        )
+
+        pipeline = MessagePipeline(
+            controller=controller,
+            memory=self.memory,
+            trigger=trigger,
+            long_term_memory=self.long_term_memory,
+            persona=persona,
+            context_short_term_messages=self.context_short_term_messages,
+            extraction_threshold=self.extraction_threshold,
+        )
+        self._pipeline_cache[context_id] = pipeline
+        LOG.info("上下文配置已生效 [%s]: persona=%s", context_id, resolved["persona_file"])
+        return pipeline
 
     def _is_group_allowed(self, event: GroupMessageEvent) -> bool:
         group_id = getattr(event, "group_id", None)
@@ -211,6 +295,7 @@ class AgentRouterPlugin(NcatBotPlugin):
         user_id = getattr(event, "user_id", None)
         if user_id is None:
             return False
+        
         whitelist = {str(u) for u in self.private_whitelist}
         return not whitelist or str(user_id) in whitelist
 
