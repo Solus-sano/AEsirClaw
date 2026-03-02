@@ -1,5 +1,5 @@
 llm:
-  provider: xxx
+  provider: moonshot
   model: kimi-k2.5
   model_base_url: https://api.moonshot.cn/v1
   api_key: Your-API-Key
@@ -14,19 +14,31 @@ memory:
   profiles_dir: agent_core/memory/profiles
   summaries_dir: agent_core/memory/summaries
 
-trigger:
-  keywords: []
-  group_cooldown_seconds: 1800
-  private_cooldown_seconds: 0.1
-
-output:
-  typing_delay_per_char: 0.5    # 每字符延迟（秒）
-  random_delay_range: [2.0, 4.0] # 随机波动范围（秒）
-  max_delay: 10.0                 # 最大延迟上限（秒）
+routing:
+  defaults:
+    persona_file: persona_firefly.yaml
+    trigger:
+      keywords: []
+      group_cooldown_seconds: 1800
+      private_cooldown_seconds: 0.1
+    output:
+      typing_delay_per_char: 0.5    # 每字符延迟（秒）
+      random_delay_range: [2.0, 4.0] # 随机波动范围（秒）
+      max_delay: 10.0                 # 最大延迟上限（秒）
+  xlpj-quiet:
+    persona_file: persona_xlpj-quiet.yaml
+    output:
+      typing_delay_per_char: 0.8
+      random_delay_range: [4.0, 8.0]
+      max_delay: 20.0
 
 bot_config:
   bot_qq: "Your-Bot-QQ"
-  group_whitelist: ["Group-ID-1","Group-ID-2"]
-  private_whitelist: ["User-ID-1","User-ID-2"]
+  group_whitelist:
+    "Group-ID-1": defaults
+    "Group-ID-2": xlpj-quiet
+  private_whitelist:
+    "User-ID-1": defaults
+    "User-ID-2": xlpj-quiet
   ws_uri: ws://localhost:45115
   ws_token: "Your-WS-Token"
