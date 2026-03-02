@@ -34,7 +34,7 @@ class AgentRouterPlugin(NcatBotPlugin):
     """将 QQ 消息路由到 AEsirClaw Agent 的插件入口。"""
 
     name = "AgentRouter"
-    version = "0.2.0"
+    version = "0.2.1"
 
     async def on_load(self):
         self.cfg = AppConfig()
