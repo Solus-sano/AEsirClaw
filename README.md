@@ -116,7 +116,7 @@ uv sync
    cp config/bot_example.yaml config/bot.yaml
    ```
    填入 LLM API Key、目标模型、以及群/私聊白名单。
-4. **加载人格** — 编辑 `config/personal_xlpj.yaml`（或新建人格卡），并在 `config/bot.yaml` 的 `routing.defaults.persona_file` / `routing.groups.*.persona_file` / `routing.users.*.persona_file` 中引用。
+4. **加载人格** — 编辑 `config/persona_xlpj.yaml`（或新建人格卡），并在 `config/bot.yaml` 的 `routing` 命名配置中通过 `persona_file` 引用。
 
 ### 构建沙箱镜像
 
@@ -157,7 +157,7 @@ memory:
 
 routing:
   defaults:
-    persona_file: personal_xlpj.yaml
+    persona_file: persona_firefly.yaml
     trigger:
       keywords: []                         # 默认关键词触发
       group_cooldown_seconds: 1800
@@ -166,29 +166,26 @@ routing:
       typing_delay_per_char: 0.5           # 基准字符输入延迟 (s)
       random_delay_range: [2.0, 4.0]       # 段落停顿随机扰动 (s)
       max_delay: 10.0                      # 硬性延迟上限 (s)
-  groups:
-    "Group-1":
-      persona_file: personal_group1.yaml
-      trigger:
-        keywords: ["bot"]
-        group_cooldown_seconds: 300
-      output:
-        typing_delay_per_char: 0.3
-  users:
-    "User-1":
-      persona_file: personal_user1.yaml
-      output:
-        max_delay: 3.0
+  xlpj-quiet:
+    persona_file: persona_xlpj-quiet.yaml
+    output:
+      typing_delay_per_char: 0.8
+      random_delay_range: [4.0, 8.0]
+      max_delay: 20.0
 
 bot_config:
   bot_qq: "Your-Bot-QQ"
-  group_whitelist: ["Group-1", "Group-2"]
-  private_whitelist: ["User-1", "User-2"]
+  group_whitelist:
+    "Group-1": defaults
+    "Group-2": xlpj-quiet
+  private_whitelist:
+    "User-1": defaults
+    "User-2": xlpj-quiet
   ws_uri: ws://localhost:45115
   ws_token: "Your-WS-Token"
 ```
 
-`routing` 的优先级为：`defaults` < `groups.<group_id>` / `users.<user_id>`。未覆写项自动继承默认值。
+`routing` 的优先级为：`routing.defaults` < `routing.<配置名>`。白名单中每个群号/用户号都应映射到一个配置名；未覆写字段会继承 `defaults`。
 
 ## Skill 系统
 
@@ -203,7 +200,7 @@ AEsirClaw/
 ├── config_example.yaml              # Gateway Config Template
 ├── config/
 │   ├── bot_example.yaml             # Core Config Template
-│   └── personal_xlpj.yaml           # Persona Definition (example)
+│   └── persona_xlpj.yaml            # Persona Definition (example)
 ├── agent_core/                      # Agent Runtime
 │   ├── config.py                    # Config Validator & Manager
 │   ├── controller.py                # Agent Loop (Tool Calling Engine)

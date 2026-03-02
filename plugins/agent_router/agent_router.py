@@ -28,6 +28,7 @@ from agent_core.tools.docker_executor import DockerExecutor
 LOG = get_log(__name__)
 
 DEFAULT_GROUP_WHITELIST: list[str] = []
+DEFAULT_PROFILE_NAME = "defaults"
 
 
 class AgentRouterPlugin(NcatBotPlugin):
@@ -43,8 +44,14 @@ class AgentRouterPlugin(NcatBotPlugin):
         memory_cfg = self.cfg.memory
         llm_cfg = self.cfg.llm
 
-        self.group_whitelist = bot_cfg.get("group_whitelist", DEFAULT_GROUP_WHITELIST)
-        self.private_whitelist = bot_cfg.get("private_whitelist", [])
+        self.group_profile_map = self._normalize_whitelist_map(
+            bot_cfg.get("group_whitelist", DEFAULT_GROUP_WHITELIST),
+            field_name="group_whitelist",
+        )
+        self.private_profile_map = self._normalize_whitelist_map(
+            bot_cfg.get("private_whitelist", []),
+            field_name="private_whitelist",
+        )
         self.bot_qq = bot_cfg.get("bot_qq", "")
         self.init_short_term_messages = int(memory_cfg.get("init_short_term_messages", 50))
 
@@ -86,7 +93,7 @@ class AgentRouterPlugin(NcatBotPlugin):
         count = self.init_short_term_messages
         if count <= 0:
             return
-        for group_id in self.group_whitelist:
+        for group_id in self.group_profile_map:
             history = await self.api.get_group_msg_history(
                 group_id=group_id,
                 count=count,
@@ -95,7 +102,7 @@ class AgentRouterPlugin(NcatBotPlugin):
             for ev in history:
                 self.memory.append_from_event(f"group:{group_id}", ev)
 
-        for user_id in self.private_whitelist:
+        for user_id in self.private_profile_map:
             history = await self.api.get_friend_msg_history(
                 user_id=user_id,
                 message_seq=0,
@@ -174,16 +181,19 @@ class AgentRouterPlugin(NcatBotPlugin):
         routing_cfg = raw_bot.get("routing", {})
         defaults_cfg = routing_cfg.get("defaults", {})
 
-        self.default_persona_file = str(defaults_cfg.get("persona_file", "personal_xlpj.yaml"))
+        self.default_persona_file = str(defaults_cfg.get("persona_file", "persona_xlpj.yaml"))
         trigger_cfg = defaults_cfg.get("trigger", {})
         output_cfg = defaults_cfg.get("output", {})
         self.default_trigger_cfg = trigger_cfg if isinstance(trigger_cfg, dict) else {}
         self.default_output_cfg = output_cfg if isinstance(output_cfg, dict) else {}
 
-        groups = routing_cfg.get("groups", {})
-        users = routing_cfg.get("users", {})
-        self.group_overrides = groups if isinstance(groups, dict) else {}
-        self.user_overrides = users if isinstance(users, dict) else {}
+        self.named_profiles: dict[str, dict] = {}
+        if isinstance(routing_cfg, dict):
+            for name, profile_cfg in routing_cfg.items():
+                if name == DEFAULT_PROFILE_NAME:
+                    continue
+                if isinstance(profile_cfg, dict):
+                    self.named_profiles[str(name)] = profile_cfg
 
     @staticmethod
     def _merge_dict(base: dict | None, override: dict | None) -> dict:
@@ -199,19 +209,20 @@ class AgentRouterPlugin(NcatBotPlugin):
         return (0.5, 2.0)
 
     def _resolve_context_config(self, context_id: str) -> dict[str, Any]:
-        override: dict[str, Any] = {}
+        profile_name = DEFAULT_PROFILE_NAME
         if context_id.startswith("group:"):
             group_id = context_id.removeprefix("group:")
-            cand = self.group_overrides.get(group_id, {})
-            if isinstance(cand, dict):
-                override = cand
+            profile_name = self.group_profile_map.get(group_id, DEFAULT_PROFILE_NAME)
         elif context_id.startswith("private:"):
             user_id = context_id.removeprefix("private:")
-            cand = self.user_overrides.get(user_id, {})
-            if isinstance(cand, dict):
-                override = cand
+            profile_name = self.private_profile_map.get(user_id, DEFAULT_PROFILE_NAME)
+
+        override = self.named_profiles.get(profile_name, {})
+        if profile_name != DEFAULT_PROFILE_NAME and profile_name not in self.named_profiles:
+            LOG.warning("未找到配置名 '%s'，回退 defaults", profile_name)
 
         return {
+            "profile_name": profile_name,
             "persona_file": str(override.get("persona_file", self.default_persona_file)),
             "trigger": self._merge_dict(self.default_trigger_cfg, override.get("trigger")),
             "output": self._merge_dict(self.default_output_cfg, override.get("output")),
@@ -281,22 +292,49 @@ class AgentRouterPlugin(NcatBotPlugin):
             extraction_threshold=self.extraction_threshold,
         )
         self._pipeline_cache[context_id] = pipeline
-        LOG.info("上下文配置已生效 [%s]: persona=%s", context_id, resolved["persona_file"])
+        LOG.info(
+            "上下文配置已生效 [%s]: profile=%s persona=%s",
+            context_id,
+            resolved["profile_name"],
+            resolved["persona_file"],
+        )
         return pipeline
+
+    def _normalize_whitelist_map(self, raw: Any, *, field_name: str) -> dict[str, str]:
+        if isinstance(raw, dict):
+            normalized: dict[str, str] = {}
+            for key, value in raw.items():
+                key_str = str(key).strip()
+                if not key_str:
+                    continue
+                profile_name = str(value).strip() if value is not None else ""
+                normalized[key_str] = profile_name or DEFAULT_PROFILE_NAME
+            return normalized
+        if isinstance(raw, list):
+            # 兼容旧格式列表：自动映射到 defaults
+            normalized = {}
+            for item in raw:
+                key_str = str(item).strip()
+                if key_str:
+                    normalized[key_str] = DEFAULT_PROFILE_NAME
+            if normalized:
+                LOG.warning("检测到旧版 %s 列表格式，已自动映射为 defaults", field_name)
+            return normalized
+        return {}
 
     def _is_group_allowed(self, event: GroupMessageEvent) -> bool:
         group_id = getattr(event, "group_id", None)
         if group_id is None:
             return False
-        whitelist = {str(g) for g in self.group_whitelist}
+        whitelist = set(self.group_profile_map.keys())
         return not whitelist or str(group_id) in whitelist
 
     def _is_private_allowed(self, event: PrivateMessageEvent) -> bool:
         user_id = getattr(event, "user_id", None)
         if user_id is None:
             return False
-        
-        whitelist = {str(u) for u in self.private_whitelist}
+
+        whitelist = set(self.private_profile_map.keys())
         return not whitelist or str(user_id) in whitelist
 
     def _check_self(self, event) -> bool:
