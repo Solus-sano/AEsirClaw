@@ -21,3 +21,4 @@ note/
 # security
 config/bot.yaml
 config.yaml
+config/persona_*
