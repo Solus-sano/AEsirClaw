@@ -47,6 +47,7 @@ def create_mcp_server(
         msg.time = time.strftime("%Y-%m-%d %H:%M")
         msg.sender_name = bot_name
         msg.content = content
+        msg.is_root = False
         memory.append(context_id, msg)
 
     # ─── 沙箱执行工具 ──────────────────────────────────────

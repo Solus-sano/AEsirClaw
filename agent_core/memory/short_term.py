@@ -136,12 +136,14 @@ _cq_processor.register("file", _handle_file)
 # ---------------------------------------------------------------------------
 
 class MemoryMessage:
-    time: str   # yyyy-mm-dd HH:MM
-    sender_name: str
-    content: str
+    time: str = ""   # yyyy-mm-dd HH:MM
+    sender_name: str = ""
+    content: str = ""
+    is_root: bool = False
     
-    def to_str(self, userid_nickname_map: Dict[str, str]) -> str:
-        raw_str = f"[t={self.time}] [ID={self.sender_name}] [msg={self.content}]"
+    def to_str(self, userid_nickname_map: Dict[str, str], *, is_group: bool = False) -> str:
+        sender_name = f"[ROOT]{self.sender_name}" if is_group and self.is_root else self.sender_name
+        raw_str = f"[t={self.time}] [ID={sender_name}] [msg={self.content}]"
         # 第一步：at → @昵称（需要昵称映射，优先处理）
         for userid, nickname in userid_nickname_map.items():
             raw_str = raw_str.replace(f"[CQ:at,qq={userid}]", f"@{nickname}")
@@ -150,22 +152,25 @@ class MemoryMessage:
         return raw_str
 
     @classmethod
-    def from_event(cls, event: BaseMessageEvent) -> "MemoryMessage":
+    def from_event(cls, event: BaseMessageEvent, root_qq: str = "") -> "MemoryMessage":
         message = cls()
         message.time = time.strftime("%Y-%m-%d %H:%M", time.localtime(event.time))
         message.sender_name = event.sender.nickname
         message.content = event.raw_message
+        user_id = str(getattr(event, "user_id", "")).strip()
+        message.is_root = bool(root_qq) and user_id == root_qq
         return message
 
 class ShortTermMemory:
     """基于 deque 的短期记忆，按 context_id 维护会话。"""
 
-    def __init__(self, api: BotAPI, max_size: int = 200):
+    def __init__(self, api: BotAPI, max_size: int = 200, root_qq: str = ""):
         self.api = api
         self.queues: Dict[str, Deque[MemoryMessage]] = {}
         self.max_size = max_size
         self.counters: Dict[str, int] = {}
         self.group_userid_nickname_map: Dict[str, Dict[str, str]] = {}
+        self.root_qq = str(root_qq).strip()
         
     async def get_userid_nickname_map(self, group_id: str) -> Dict[str, str]:
         """获取用户 ID 和昵称映射"""
@@ -185,7 +190,7 @@ class ShortTermMemory:
         self.counters[context_id] = self.counters.get(context_id, 0) + 1
 
     def append_from_event(self, context_id: str, event: BaseMessageEvent) -> None:
-        memory_message = MemoryMessage.from_event(event)
+        memory_message = MemoryMessage.from_event(event, root_qq=self.root_qq)
         self.append(context_id, memory_message)
     
     def get_recent(self, context_id: str, n: int | None = None) -> List[MemoryMessage]:
@@ -197,9 +202,11 @@ class ShortTermMemory:
     def get_recent_str(self, context_id: str, n: int | None = None) -> str:
         # import ipdb; ipdb.set_trace()
         if context_id.startswith("group:"):
-            return "\n".join([message.to_str(self.group_userid_nickname_map[context_id.replace("group:", "")]) for message in self.get_recent(context_id, n=n)])
+            group_id = context_id.replace("group:", "")
+            nickname_map = self.group_userid_nickname_map.get(group_id, {})
+            return "\n".join([message.to_str(nickname_map, is_group=True) for message in self.get_recent(context_id, n=n)])
         else:
-            return "\n".join([message.to_str({}) for message in self.get_recent(context_id, n=n)])
+            return "\n".join([message.to_str({}, is_group=False) for message in self.get_recent(context_id, n=n)])
 
     def should_extract(self, context_id: str, threshold: int = 200) -> bool:
         """达到阈值后可触发摘要提取。"""
