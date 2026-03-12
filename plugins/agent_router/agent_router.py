@@ -29,6 +29,7 @@ LOG = get_log(__name__)
 
 DEFAULT_GROUP_WHITELIST: list[str] = []
 DEFAULT_PROFILE_NAME = "defaults"
+GATEWAY_CONFIG_FILENAME = "config.yaml"
 
 
 class AgentRouterPlugin(NcatBotPlugin):
@@ -39,6 +40,7 @@ class AgentRouterPlugin(NcatBotPlugin):
 
     async def on_load(self):
         self.cfg = AppConfig()
+        self.root_qq = self._load_root_qq_from_gateway_config()
 
         bot_cfg = self.cfg.bot
         memory_cfg = self.cfg.memory
@@ -60,6 +62,7 @@ class AgentRouterPlugin(NcatBotPlugin):
         self.memory = ShortTermMemory(
             api=self.api,
             max_size=int(memory_cfg.get("short_term_queue_size", 200)),
+            root_qq=self.root_qq,
         )
 
         self.llm = LLMClient(self.cfg)
@@ -194,6 +197,24 @@ class AgentRouterPlugin(NcatBotPlugin):
                     continue
                 if isinstance(profile_cfg, dict):
                     self.named_profiles[str(name)] = profile_cfg
+
+    def _load_root_qq_from_gateway_config(self) -> str:
+        path = Path(__file__).resolve().parents[2] / GATEWAY_CONFIG_FILENAME
+        if not path.exists():
+            LOG.warning("未找到网关配置文件: %s，root 标记将停用", path)
+            return ""
+        try:
+            raw = self._read_yaml(path)
+        except Exception as exc:
+            LOG.warning("读取网关配置失败: %s，root 标记将停用", exc)
+            return ""
+
+        root_qq = str(raw.get("root", "")).strip()
+        if not root_qq:
+            LOG.warning("config.yaml 未配置 root，root 标记将停用")
+            return ""
+        LOG.info("已加载 root QQ: %s", root_qq)
+        return root_qq
 
     @staticmethod
     def _merge_dict(base: dict | None, override: dict | None) -> dict:
