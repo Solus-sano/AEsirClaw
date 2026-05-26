@@ -121,10 +121,16 @@ def _handle_image(params: Dict[str, str]) -> str:
     return "[图片]"
 
 def _handle_file(params: Dict[str, str]) -> str:
-    """保留文件 URL，供后续多模态处理使用。"""
+    """保留文件信息，供后续处理使用。"""
+    file_name = params.get("file", "")
+    file_id = params.get("file_id", "")
     url = params.get("url", "")
     if url:
-        return f"[FILE:{url}]"
+        return f"[FILE:{file_name}|{url}]"
+    if file_id:
+        return f"[FILE:{file_name}|id={file_id}]"
+    if file_name:
+        return f"[FILE:{file_name}]"
     return "[文件]"
 
 _cq_processor.register("image", _handle_image)

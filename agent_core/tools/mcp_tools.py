@@ -175,22 +175,22 @@ def create_mcp_server(
         return json.dumps(messages, ensure_ascii=False)
     
     @mcp.tool()
-    async def send_forward_history(group_id: int, user_id: int, history: str) -> str:
+    async def send_group_forward_msg(group_id: int, user_id: int, messages: list[str]) -> str:
         """
-        向 QQ 群发送总结的历史信息，用转发格式。
+        向 QQ 群发送合并转发消息。
         group_id: 群号
-        user_id: 发送者 QQ 号（你的qq号，用于显示头像）
-        history: 总结的历史信息文本，多段内容用双换行分隔，每段会作为转发消息中的一条
+        user_id: 发送者 QQ 号（用于显示转发节点头像）
+        messages: 转发内容列表，每个元素会作为合并转发中的一条文本消息
         """
-        segments = [s.strip() for s in history.split("\n\n") if s.strip()]
+        segments = [msg.strip() for msg in messages if msg and msg.strip()]
         if not segments:
-            segments = [history]
+            return "转发内容不能为空"
 
-        messages = [
+        forward_messages = [
             {
                 "type": "node",
                 "data": {
-                    "name": "聊天记录总结",
+                    "name": bot_name,
                     "uin": str(user_id),
                     "content": [{"type": "text", "data": {"text": seg}}],
                 },
@@ -202,13 +202,14 @@ def create_mcp_server(
 
         await bot_api.send_group_forward_msg(
             group_id=str(group_id),
-            messages=messages,
+            messages=forward_messages,
             news=news,
-            prompt="[聊天记录]",
+            prompt="[合并转发]",
             summary=f"查看{len(segments)}条转发消息",
-            source="群聊的聊天记录",
+            source="机器人发送的合并转发消息",
         )
-        return f"已发送转发消息到群 {group_id}"
+        _record_bot_msg(f"group:{group_id}", f"[合并转发] 共 {len(segments)} 条")
+        return f"已发送 {len(segments)} 条合并转发消息到群 {group_id}"
     
     @mcp.tool()
     async def get_private_msg_history(user_id: int, count: int = 20) -> str:
