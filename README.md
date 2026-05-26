@@ -85,6 +85,11 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
 
 **打字节律 (Typing Simulation)**：受《崩坏·星穹铁道》npc聊天消息启发，发信工具底层封装了 `MessageOutputter`，动态计算文本段落间的延迟（`字数 × delay_per_char + 随机波动`），模拟真人的断句和输入节奏。
 
+## 效果预览
+
+![效果预览_1](assets/images/AEsirClaw_example_1.png)
+![效果预览_2](assets/images/AEsirClaw_example_2.png)
+
 ## Quick Start
 
 ### Prerequisites
@@ -99,6 +104,10 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
 
 ```bash
 git clone https://github.com/Solus-sano/AEsirClaw.git
+
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source ~/.bashrc
+
 cd AEsirClaw
 uv sync
 ```

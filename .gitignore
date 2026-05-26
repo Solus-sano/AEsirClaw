@@ -18,7 +18,9 @@ workspace/
 agent_core/memory/summaries/
 note/
 
+
 # security
 config/bot.yaml
 config.yaml
-config/persona_*
+config/personal_*
+guild1.db*
