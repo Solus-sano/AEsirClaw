@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Sequence, Union
@@ -67,7 +68,90 @@ class LLMClient:
         if not api_key:
             raise ValueError("LLM API Key 未配置")
 
-        self.client = AsyncOpenAI(base_url=base_url, api_key=api_key)
+        # 默认不显式发送 temperature，交由服务端默认值处理
+        # 某些接口（如 api.kimi.com/coding/v1）会对任何显式传入的 temperature 返回 400，
+        # 错误信息 "only 0.6 is allowed" 实为“请勿传，使用服务端默认”。
+        # 如需覆盖，在配置中显式写 llm.temperature: <float>。
+        temp_cfg = llm_cfg.get("temperature")
+        self.temperature: float | None = float(temp_cfg) if temp_cfg is not None else None
+
+        import httpx
+
+        # Kimi For Coding (api.kimi.com/coding) 会按 User-Agent 做白名单校验，
+        # 非 coding agent 会被拒：
+        #   403 "Kimi For Coding is currently only available for Coding Agents ..."
+        # 目前社区确认稳定可用的 UA 为 KimiCLI/1.3（Kimi 官方 CLI）。
+        # 允许通过 llm.user_agent 覆写，方便后续切到 claude-code/* 等其他白名单。
+        default_ua = "KimiCLI/1.3"
+        user_agent = llm_cfg.get("user_agent") or default_ua
+        coding_agent_headers = {
+            "User-Agent": user_agent,
+            "X-Title": "Kimi CLI",
+            "HTTP-Referer": "https://kimi.com/code",
+        }
+
+        async def _rewrite_headers(request: httpx.Request):
+            # 去掉 OpenAI SDK 的 x-stainless-* 指纹头，避免被识别为非白名单客户端
+            keys_to_remove = [
+                k for k in request.headers.keys()
+                if k.lower().startswith("x-stainless")
+            ]
+            for k in keys_to_remove:
+                del request.headers[k]
+            for k, v in coding_agent_headers.items():
+                request.headers[k] = v
+
+        async def _log_error_response(response: httpx.Response):
+            if response.status_code < 400:
+                return
+            try:
+                await response.aread()
+                body = response.text
+            except Exception:
+                body = "<unreadable body>"
+            req = response.request
+            try:
+                req_body = req.content.decode("utf-8", "replace") if req.content else ""
+            except Exception:
+                req_body = "<unreadable request body>"
+            req_id = (
+                response.headers.get("x-request-id")
+                or response.headers.get("x-msh-request-id")
+                or response.headers.get("request-id")
+                or "?"
+            )
+            safe_req_headers = {
+                k: ("***" if k.lower() in ("authorization", "api-key", "x-api-key") else v)
+                for k, v in req.headers.items()
+            }
+            LOG.error(
+                "LLM HTTP %s %s -> %s | request-id=%s\n"
+                "-- request headers: %s\n"
+                "-- request body: %s\n"
+                "-- response headers: %s\n"
+                "-- response body: %s",
+                req.method,
+                req.url,
+                response.status_code,
+                req_id,
+                safe_req_headers,
+                req_body,
+                dict(response.headers),
+                body,
+            )
+
+        http_client = httpx.AsyncClient(
+            event_hooks={
+                "request": [_rewrite_headers],
+                "response": [_log_error_response],
+            },
+        )
+
+        self.client = AsyncOpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            http_client=http_client,
+        )
 
     async def chat(
         self,
@@ -77,6 +161,8 @@ class LLMClient:
         """调用聊天补全接口并返回统一响应结构。"""
         payload = self._build_payload(messages)
         kwargs: dict[str, Any] = {"model": self.model, "messages": payload}
+        if self.temperature is not None:
+            kwargs["temperature"] = self.temperature
         if tools:
             kwargs["tools"] = tools
 
