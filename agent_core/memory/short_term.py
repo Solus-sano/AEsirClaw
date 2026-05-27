@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Callable, Dict, Deque, List
+from typing import Callable, Dict, Deque, List, Optional, Tuple
 
 import re
 import time
@@ -143,15 +143,31 @@ _cq_processor.register("file", _handle_file)
 
 class MemoryMessage:
     time: str   # yyyy-mm-dd HH:MM
-    sender_name: str
+    sender_name: str  # QQ 全局昵称（稳定标识）
+    sender_card: Optional[str]  # 群名片，私聊时为 None
     content: str
-    
-    def to_str(self, userid_nickname_map: Dict[str, str]) -> str:
-        raw_str = f"[t={self.time}] [ID={self.sender_name}] [msg={self.content}]"
-        # 第一步：at → @昵称（需要昵称映射，优先处理）
-        for userid, nickname in userid_nickname_map.items():
-            raw_str = raw_str.replace(f"[CQ:at,qq={userid}]", f"@{nickname}")
-        # 第二步：清洗剩余 CQ 码
+
+    def _format_sender_id(self) -> str:
+        """根据是否有群名片生成 [QQ_ID=...] 显示文本。"""
+        card = getattr(self, "sender_card", None)
+        if card and card != self.sender_name:
+            return f"{self.sender_name}(本群昵称:{card})"
+        return self.sender_name
+
+    @staticmethod
+    def _format_at_name(nickname: str, card: Optional[str]) -> str:
+        """生成 @ 某人时的显示文本。"""
+        if card and card != nickname:
+            return f"@{card}({nickname})"
+        return f"@{nickname}"
+
+    def to_str(self, userid_name_map: Dict[str, Tuple[str, Optional[str]]]) -> str:
+        raw_str = f"[time={self.time}] [QQ_ID={self._format_sender_id()}] [msg={self.content}] \n"
+        for userid, (nickname, card) in userid_name_map.items():
+            raw_str = raw_str.replace(
+                f"[CQ:at,qq={userid}]",
+                self._format_at_name(nickname, card),
+            )
         raw_str = _cq_processor.process(raw_str)
         return raw_str
 
@@ -160,6 +176,8 @@ class MemoryMessage:
         message = cls()
         message.time = time.strftime("%Y-%m-%d %H:%M", time.localtime(event.time))
         message.sender_name = event.sender.nickname
+        card = getattr(event.sender, "card", None)
+        message.sender_card = card if card else None
         message.content = event.raw_message
         return message
 
@@ -171,16 +189,16 @@ class ShortTermMemory:
         self.queues: Dict[str, Deque[MemoryMessage]] = {}
         self.max_size = max_size
         self.counters: Dict[str, int] = {}
-        self.group_userid_nickname_map: Dict[str, Dict[str, str]] = {}
-        
-    async def get_userid_nickname_map(self, group_id: str) -> Dict[str, str]:
-        """获取用户 ID 和昵称映射"""
+        self.group_userid_name_map: Dict[str, Dict[str, Tuple[str, Optional[str]]]] = {}
+
+    async def get_userid_nickname_map(self, group_id: str) -> None:
+        """获取用户 ID → (QQ昵称, 群名片) 映射"""
         GroupMemResponse = await self.api.get_group_member_list(group_id=group_id)
+        if group_id not in self.group_userid_name_map:
+            self.group_userid_name_map[group_id] = {}
         for item in GroupMemResponse.members:
-            if group_id not in self.group_userid_nickname_map:
-                self.group_userid_nickname_map[group_id] = {}
-            nickname = item.nickname if item.card == "" else item.card
-            self.group_userid_nickname_map[group_id][str(item.user_id)] = nickname #! 使用card而不是nickname
+            card = item.card if item.card else None
+            self.group_userid_name_map[group_id][str(item.user_id)] = (item.nickname, card)
         
 
     def append(self, context_id: str, message: MemoryMessage) -> None:
@@ -201,11 +219,16 @@ class ShortTermMemory:
         return list(self.queues.get(context_id, []))[-n:]
     
     def get_recent_str(self, context_id: str, n: int | None = None) -> str:
-        # import ipdb; ipdb.set_trace()
         if context_id.startswith("group:"):
-            return "\n".join([message.to_str(self.group_userid_nickname_map[context_id.replace("group:", "")]) for message in self.get_recent(context_id, n=n)])
-        else:
-            return "\n".join([message.to_str({}) for message in self.get_recent(context_id, n=n)])
+            group_id = context_id.removeprefix("group:")
+            name_map = self.group_userid_name_map.get(group_id, {})
+            return "\n".join(
+                message.to_str(name_map)
+                for message in self.get_recent(context_id, n=n)
+            )
+        return "\n".join(
+            message.to_str({}) for message in self.get_recent(context_id, n=n)
+        )
 
     def should_extract(self, context_id: str, threshold: int = 200) -> bool:
         """达到阈值后可触发摘要提取。"""
