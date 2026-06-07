@@ -15,6 +15,7 @@ from ncatbot.utils import get_log
 if TYPE_CHECKING:
     from agent_core.output import MessageOutputter
     from agent_core.memory.short_term import ShortTermMemory
+    from agent_core.scheduler import TaskScheduler
     from agent_core.tools.docker_executor import BaseExecutor
     from ncatbot.core.api import BotAPI
     
@@ -33,11 +34,16 @@ def create_mcp_server(
     memory: ShortTermMemory,
     bot_name: str = "Bot",
     executor: BaseExecutor | None = None,
+    scheduler: TaskScheduler | None = None,
+    context_id: str | None = None,
 ) -> FastMCP:
     """创建并返回已注册所有工具的 FastMCP 实例。
 
-    工具 handler 通过闭包捕获外部依赖（outputter / bot_api / executor），
-    避免全局状态。
+    工具 handler 通过闭包捕获外部依赖（outputter / bot_api / executor /
+    scheduler / context_id），避免全局状态。
+
+    scheduler 与 context_id 用于定时任务工具：context_id 决定任务绑定到
+    哪个会话（在哪个群/私聊设置就在哪触发）。
     """
     mcp = FastMCP("AEsirClaw Agent Tools")
 
@@ -255,6 +261,81 @@ def create_mcp_server(
                 return post.content
         return json.dumps({"ok": False, "error": f"未找到名为 '{name}' 的技能"}, ensure_ascii=False)
 
+    # ─── 定时任务工具 ──────────────────────────────────────
 
+    @mcp.tool()
+    async def add_scheduled_task(
+        type: str,
+        prompt: str,
+        interval_seconds: float = None,
+        time: str = None,
+        delay_seconds: float = None,
+    ) -> str:
+        """为当前会话设置一个定时任务。到点后系统会自动唤醒你来完成它。
+
+        type: 任务类型，必须是以下之一：
+          - "once":     一次性任务，到点触发一次后自动删除。需配合 delay_seconds 使用。
+          - "interval": 每隔固定时间重复触发。需配合 interval_seconds 使用。
+          - "daily":    每天固定时刻触发。需配合 time 使用。
+        prompt: 触发时给你自己的任务说明，写清到点时你要做什么（如"提醒大家喝水"）。
+        interval_seconds: type=interval 时必填，重复间隔（秒）。如每小时填 3600。
+        time: type=daily 时必填，每天触发时刻，格式 "HH:MM"（24小时制），如 "09:00"。
+        delay_seconds: type=once 时必填，相对现在多少秒后触发。如10分钟后填 600。
+
+        任务自动绑定到当前会话（在哪个群/私聊设置就在哪触发）。
+        """
+        if scheduler is None or context_id is None:
+            return json.dumps({"ok": False, "error": "定时任务调度器未初始化"}, ensure_ascii=False)
+        try:
+            task = scheduler.add_task(
+                context_id=context_id,
+                type=type,
+                prompt=prompt,
+                interval_seconds=interval_seconds,
+                time_str=time,
+                delay_seconds=delay_seconds,
+            )
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        return json.dumps(
+            {"ok": True, "task_id": task.id, "schedule": task.describe(), "prompt": task.prompt},
+            ensure_ascii=False,
+        )
+
+    @mcp.tool()
+    async def list_scheduled_tasks() -> str:
+        """列出当前会话已设置的所有定时任务，返回 JSON 列表。"""
+        if scheduler is None or context_id is None:
+            return json.dumps({"ok": False, "error": "定时任务调度器未初始化"}, ensure_ascii=False)
+        tasks = scheduler.list_tasks(context_id=context_id)
+        return json.dumps(
+            [
+                {
+                    "task_id": t.id,
+                    "type": t.type,
+                    "schedule": t.describe(),
+                    "prompt": t.prompt,
+                    "last_run": t.last_run,
+                }
+                for t in tasks
+            ],
+            ensure_ascii=False,
+        )
+
+    @mcp.tool()
+    async def remove_scheduled_task(task_id: str) -> str:
+        """删除当前会话的一个定时任务。
+
+        task_id: 要删除的任务 ID（可先用 list_scheduled_tasks 查询）。
+        """
+        if scheduler is None or context_id is None:
+            return json.dumps({"ok": False, "error": "定时任务调度器未初始化"}, ensure_ascii=False)
+        ok = scheduler.remove_task(task_id, context_id=context_id)
+        if ok:
+            return json.dumps({"ok": True, "task_id": task_id}, ensure_ascii=False)
+        return json.dumps(
+            {"ok": False, "error": f"未找到属于当前会话的任务 '{task_id}'"},
+            ensure_ascii=False,
+        )
 
     return mcp

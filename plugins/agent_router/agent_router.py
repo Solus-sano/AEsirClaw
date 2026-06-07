@@ -13,14 +13,17 @@ from ncatbot.plugin_system import NcatBotPlugin, filter_registry
 from ncatbot.utils import get_log
 from ncatbot.utils.assets.literals import OFFICIAL_STARTUP_EVENT
 
+import time
+
 from agent_core.config import AppConfig
 from agent_core.controller import AgentController
 from agent_core.debouncer import Debouncer
 from agent_core.llm import LLMClient
 from agent_core.memory.long_term import LongTermMemory
-from agent_core.memory.short_term import ShortTermMemory
+from agent_core.memory.short_term import MemoryMessage, ShortTermMemory
 from agent_core.output import MessageOutputter
 from agent_core.pipeline import MessagePipeline
+from agent_core.scheduler import TaskScheduler
 from agent_core.trigger import TriggerManager
 from agent_core.tools import create_mcp_server
 from agent_core.tools.docker_executor import DockerExecutor
@@ -29,6 +32,9 @@ LOG = get_log(__name__)
 
 DEFAULT_GROUP_WHITELIST: list[str] = []
 DEFAULT_PROFILE_NAME = "defaults"
+
+_PROJECT_DIR = Path(__file__).resolve().parents[2]
+_SCHEDULE_FILE = _PROJECT_DIR / "data" / "schedules.json"
 
 
 class AgentRouterPlugin(NcatBotPlugin):
@@ -76,6 +82,15 @@ class AgentRouterPlugin(NcatBotPlugin):
         self._pipeline_cache: dict[str, MessagePipeline] = {}
 
         self.debouncer = Debouncer(delay=5.0)
+
+        # ── 定时任务调度器 ───────────────────────────────────
+        scheduler_cfg = self.cfg.scheduler
+        self.scheduler = TaskScheduler(
+            _SCHEDULE_FILE,
+            scan_interval=float(scheduler_cfg.get("scan_interval", 20.0)),
+        )
+        self.scheduler.set_callback(self._on_scheduled_trigger)
+        self.scheduler.start()
 
         self.register_handler(OFFICIAL_STARTUP_EVENT, self._on_bot_ready)
 
@@ -176,6 +191,21 @@ class AgentRouterPlugin(NcatBotPlugin):
         except Exception as exc:
             LOG.error("处理消息失败 [%s]: %s\n%s", context_id, exc, traceback.format_exc())
 
+    async def _on_scheduled_trigger(self, context_id: str, prompt: str) -> None:
+        """定时任务触发回调：注入一条系统消息后唤醒 Agent Loop。
+
+        定时触发是机器人的主动行为：先把任务说明以系统消息形式写入短期记忆，
+        再以 is_scheduled=True 走 pipeline（绕过冷却，但走正常触发体系）。
+        """
+        sys_msg = MemoryMessage()
+        sys_msg.time = time.strftime("%Y-%m-%d %H:%M")
+        sys_msg.sender_name = "系统"
+        sys_msg.sender_card = None
+        sys_msg.content = f"[定时任务触发] 这是一个定时任务，任务说明：{prompt}。请根据你的人格在当前会话里完成它。"
+        self.memory.append(context_id, sys_msg)
+
+        await self._safe_handle(context_id, is_scheduled=True, message=sys_msg.content)
+
     def _load_routing_config(self) -> None:
         raw_bot = getattr(self.cfg, "_bot", {})
         routing_cfg = raw_bot.get("routing", {})
@@ -267,6 +297,8 @@ class AgentRouterPlugin(NcatBotPlugin):
             memory=self.memory,
             bot_name=bot_name,
             executor=self.executor,
+            scheduler=self.scheduler,
+            context_id=context_id,
         )
 
         controller = AgentController(

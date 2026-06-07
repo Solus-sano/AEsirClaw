@@ -35,6 +35,10 @@ class AppConfig:
         return self._bot.get("memory", {})
 
     @property
+    def scheduler(self) -> dict:
+        return self._bot.get("scheduler", {})
+
+    @property
     def trigger(self) -> dict:
         return self._bot.get("trigger", {})
 

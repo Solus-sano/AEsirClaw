@@ -18,6 +18,7 @@ class TriggerType(Enum):
     """触发类型枚举"""
     FORCED = "forced"       # 强制触发：@、私聊
     KEYWORD = "keyword"     # 关键词触发
+    SCHEDULED = "scheduled" # 定时任务触发：机器人主动行为，优先级最高且独立于冷却
     SMART = "smart"         # 智能触发（预留）
     NONE = "none"           # 不触发
 
@@ -66,6 +67,7 @@ class TriggerManager:
         message: str,
         *,
         is_at_me: bool = False,
+        is_scheduled: bool = False,
     ) -> TriggerResult:
         """检查是否应该触发响应
         
@@ -73,10 +75,16 @@ class TriggerManager:
             context_id: 上下文ID，格式为 "group:xxx" 或 "private:xxx"
             message: 消息内容
             is_at_me: 是否 @ 了机器人
+            is_scheduled: 是否由定时任务调度器触发（机器人主动行为）
             
         Returns:
             TriggerResult: 触发检查结果
         """
+        # 0. 定时任务触发：最高优先级，无视冷却与白名单关键词。
+        #    这是机器人的主动行为，与用户消息的防打扰冷却是两个维度。
+        if is_scheduled:
+            return TriggerResult(True, TriggerType.SCHEDULED, "定时任务触发")
+
         is_private = context_id.startswith("private:")
         
         # 1. 强制触发：私聊

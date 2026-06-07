@@ -14,6 +14,10 @@ memory:
   profiles_dir: agent_core/memory/profiles
   summaries_dir: agent_core/memory/summaries
 
+scheduler:
+  scan_interval: 20.0   # 定时任务扫描间隔（秒）。越小触发越精准，但更频繁唤醒；
+                        # "每天HH:MM / 每隔N分钟" 这类需求 20s 足够。
+
 routing:
   defaults:
     persona_file: example_personal.yaml

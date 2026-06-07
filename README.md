@@ -38,6 +38,7 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
         │     ├── send_group_media / send_private_media → QQ
         │     ├── execute_task → Docker 沙箱
         │     ├── get_skill → Skill 文档查询
+        │     ├── *_scheduled_task → TaskScheduler（定时任务）
         │     └── get_*_msg_history → 历史消息查询
         │
         └─ Docker 容器
@@ -192,6 +193,26 @@ bot_config:
 
 模仿[Claude skill](https://code.claude.com/docs/en/skills)范式，符合规范的 Skill 由一个声明性 `SKILL.md`（定义接口和逻辑）及 `src/` 目录下的可执行载荷（可选）构成。
 
+## 定时任务系统
+
+Agent 可以为当前会话自主设定定时任务，到点后调度器主动唤醒它在原会话（群聊/私聊）里行动——「过会儿提醒我」「每天早安」「每隔一小时汇报」皆可一句话搞定。
+
+**设计要点：**
+- **触发即一等公民** — 定时触发被纳入 `TriggerType.SCHEDULED`，优先级最高且独立于用户消息的防打扰冷却，而非 hack 式绕过。到点时向短期记忆注入一条 `[定时任务触发]` 系统消息，再以 `is_scheduled=True` 走正常 Pipeline，由 Agent Loop 自行决定如何发言。
+- **轻量自调度** — `TaskScheduler` 挂在主进程 asyncio event loop 上常驻扫描（默认 20s 一轮），无额外重依赖。
+- **文件持久化** — 任务以 JSON 存于 `data/schedules.json`，人类可读、可手动增删改。
+- **停机补偿** — 进程长时间停机后，过期的重复任务在加载时重算到下一个未来时刻，避免启动瞬间补偿性刷屏。
+
+**任务类型：**
+
+| Type | 说明 | 关键字段 |
+|------|------|------|
+| `once` | 一次性，触发后自动删除 | `delay_seconds`（N 秒后触发） |
+| `interval` | 每隔固定时间重复 | `interval_seconds` |
+| `daily` | 每天固定时刻触发 | `time`（`HH:MM`，24 小时制） |
+
+**Agent 可调用的 MCP 工具：** `add_scheduled_task` / `list_scheduled_tasks` / `remove_scheduled_task`。任务自动绑定到创建时所在会话，并对跨会话删除做保护。
+
 ## 项目结构(部分省略)
 
 ```text
@@ -209,6 +230,7 @@ AEsirClaw/
 │   ├── llm.py                       # LLM Facade
 │   ├── trigger.py                   # Trigger Logic
 │   ├── debouncer.py                 # Async Debouncer
+│   ├── scheduler.py                 # Scheduled Task Engine
 │   ├── output.py                    # Output Streamer
 │   ├── tools/
 │   │   ├── mcp_tools.py             # FastMCP Router
@@ -228,7 +250,7 @@ AEsirClaw/
 ## TODO List
 
 - [ ] **记忆系统** — 自动总结聊天记录，提取 high-level 语意的实体与事实，维护长效结构化记忆。
-- [ ] **定时任务触发** — Agent 可主动设置或移除定时任务。
+- [x] **定时任务触发** — Agent 可主动设置或移除定时任务（支持 once / interval / daily，文件持久化）。
 - [ ] **更多 Skill 和 MCP 工具** — 接入系统文件管理、音视频流式处理等高级工具能力。
 
 ## Acknowledgement
