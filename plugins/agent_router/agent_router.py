@@ -84,13 +84,17 @@ class AgentRouterPlugin(NcatBotPlugin):
         self.debouncer = Debouncer(delay=5.0)
 
         # ── 定时任务调度器 ───────────────────────────────────
+        # 注意：on_load 由框架在独立线程的临时 event loop 上执行
+        # （loader.py: loop.run_until_complete(...) 后 loop.close()），
+        # 因此这里只构造调度器，绝不能在此 start()——否则扫描协程会被挂到
+        # 那个用完即弃的 loop 上，永远不会被调度。真正的启动放在
+        # _on_bot_ready（运行于 bot 主 loop）中。
         scheduler_cfg = self.cfg.scheduler
         self.scheduler = TaskScheduler(
             _SCHEDULE_FILE,
             scan_interval=float(scheduler_cfg.get("scan_interval", 20.0)),
         )
         self.scheduler.set_callback(self._on_scheduled_trigger)
-        self.scheduler.start()
 
         self.register_handler(OFFICIAL_STARTUP_EVENT, self._on_bot_ready)
 
@@ -99,10 +103,12 @@ class AgentRouterPlugin(NcatBotPlugin):
     # ── Startup ──────────────────────────────────────────────
 
     async def _on_bot_ready(self, event):
-        """Bot 连接成功后加载历史消息。"""
+        """Bot 连接成功后加载历史消息，并在主 loop 上启动定时任务调度器。"""
         LOG.info("Bot 连接成功，开始加载历史消息...")
         await self._load_recent_messages()
         LOG.info("历史消息加载完成。")
+        # 在 bot 主 event loop 上启动调度器（此回调即运行于该 loop）
+        self.scheduler.start()
 
     async def _load_recent_messages(self) -> None:
         count = self.init_short_term_messages

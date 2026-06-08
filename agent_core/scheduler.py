@@ -82,11 +82,33 @@ class TaskScheduler:
         self._callback = callback
 
     def start(self) -> None:
-        """启动常驻扫描循环（幂等）。"""
+        """启动常驻扫描循环（幂等）。
+
+        必须在 bot 主 event loop 运行后调用——asyncio.create_task 会把扫描
+        协程绑定到「当前正在运行的」loop。若在临时 loop（如插件 on_load）里
+        调用，扫描协程会随该 loop 关闭而失效。
+        """
         if self._loop_task is not None and not self._loop_task.done():
             return
+        # 启动前把所有已过期的重复任务对齐到下一个未来时刻，避免重启瞬间
+        # 补偿性触发一堆过期任务。
+        self._align_overdue_tasks()
         self._loop_task = asyncio.create_task(self._scan_loop())
         LOG.info("TaskScheduler 已启动，加载任务 %d 个", len(self._tasks))
+
+    def _align_overdue_tasks(self) -> None:
+        """将已过期的 interval/daily 任务的 next_run 重算到下一个未来时刻。"""
+        now = time.time()
+        changed = False
+        for task in self._tasks.values():
+            if task.type in ("interval", "daily") and task.next_run <= now:
+                try:
+                    task.next_run = self._compute_next_run(task, reference=now)
+                    changed = True
+                except ValueError as exc:
+                    LOG.warning("[Scheduler] 任务 %s 对齐失败: %s", task.id, exc)
+        if changed:
+            self._save()
 
     def stop(self) -> None:
         if self._loop_task is not None:
@@ -256,7 +278,6 @@ class TaskScheduler:
             LOG.warning("[Scheduler] 任务文件格式异常（非列表），忽略")
             return
 
-        now = time.time()
         valid_fields = ScheduledTask.__dataclass_fields__.keys()
         for item in raw:
             if not isinstance(item, dict):
@@ -264,12 +285,11 @@ class TaskScheduler:
             try:
                 filtered = {k: v for k, v in item.items() if k in valid_fields}
                 task = ScheduledTask(**filtered)
-                # 重复任务若 next_run 已过期（停机期间错过），重算到未来
-                if task.type in ("interval", "daily") and task.next_run <= now:
-                    task.next_run = self._compute_next_run(task, reference=now)
                 self._tasks[task.id] = task
             except (TypeError, ValueError) as exc:
                 LOG.warning("[Scheduler] 跳过非法任务条目 %s: %s", item, exc)
+        # 注：过期重复任务的对齐统一在 start() 时进行（_load 发生在构造期，
+        # 此时尚无运行中的 event loop，且与 start 之间可能有时间差）。
 
     def _save(self) -> None:
         try:

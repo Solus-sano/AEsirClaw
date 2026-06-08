@@ -46,7 +46,7 @@ async def _download_and_resize(url: str, max_side: int = 224) -> str | None:
             ratio = max_side / max(w, h)
             img = img.resize((int(w * ratio), int(h * ratio)), Image.LANCZOS)
 
-        img.save(f"test.png")
+        # img.save(f"test.png")
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode()

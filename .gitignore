@@ -17,6 +17,7 @@ data/
 workspace/
 agent_core/memory/summaries/
 note/
+.note/
 
 
 # security
