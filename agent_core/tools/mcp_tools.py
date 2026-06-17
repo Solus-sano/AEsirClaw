@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from agent_core.output import MessageOutputter
     from agent_core.memory.short_term import ShortTermMemory
     from agent_core.scheduler import TaskScheduler
+    from agent_core.subagent import SubAgentRunner
     from agent_core.tools.docker_executor import BaseExecutor
     from ncatbot.core.api import BotAPI
     
@@ -27,6 +28,36 @@ _PROJECT_DIR = Path(__file__).resolve().parent.parent.parent
 LOG = get_log(__name__)
 
 
+def _event_sender_nickname(ev: object) -> str:
+    sender = getattr(ev, "sender", None)
+    if isinstance(sender, dict):
+        return sender.get("nickname", "unknown")
+    return getattr(sender, "nickname", "unknown") if sender else "unknown"
+
+
+def _events_to_messages(history: list) -> list[dict]:
+    return [
+        {
+            "sender": _event_sender_nickname(ev),
+            "content": _cq_processor.process(getattr(ev, "raw_message", "")),
+            "time": getattr(ev, "time", 0),
+        }
+        for ev in history
+    ]
+
+
+def _slice_history_by_before_range(
+    history: list, before_near: int, before_far: int
+) -> list:
+    """从最近 before_far 条消息中截取 [before_near, before_far] 区间（1-indexed，距现在条数）。"""
+    n = len(history)
+    start = max(0, n - before_far)
+    end = max(0, n - before_near + 1)
+    if start >= end:
+        return []
+    return history[start:end]
+
+
 def create_mcp_server(
     *,
     outputter: MessageOutputter,
@@ -36,6 +67,7 @@ def create_mcp_server(
     executor: BaseExecutor | None = None,
     scheduler: TaskScheduler | None = None,
     context_id: str | None = None,
+    subagent_runner: SubAgentRunner | None = None,
 ) -> FastMCP:
     """创建并返回已注册所有工具的 FastMCP 实例。
 
@@ -161,24 +193,48 @@ def create_mcp_server(
         return f"已发送{label}到用户 {user_id}"
 
     @mcp.tool()
-    async def get_group_msg_history(group_id: int, count: int = 20) -> str:
+    async def get_group_msg_history(
+        group_id: int,
+        count: int = 20,
+        before_near: int | None = None,
+        before_far: int | None = None,
+    ) -> str:
         """
         如果需要获取更多的群聊历史，可以调用此工具获取群聊历史消息记录。
         group_id: 群聊 ID
-        count: 获取的消息数量，默认 20（即最近20条消息）
-        返回 JSON 格式的消息列表。
+        count: 获取最近的消息数量，默认 20。仅在不指定 before_near / before_far 时生效。
+        before_near: 区间较近边界（距现在第几条），如 100 表示从第 100 条前开始（含）。
+        before_far: 区间较远边界（距现在第几条），如 200 表示到第 200 条前为止（含）。
+        指定 before_near 与 before_far 时，返回 [before_near, before_far] 区间内的消息
+        （例如 before_near=100, before_far=200 即第 100～200 条前的消息，共 101 条）。
+        返回 JSON 格式的消息列表，按时间从旧到新排列。
         """
+        if (before_near is None) ^ (before_far is None):
+            return json.dumps(
+                {"ok": False, "error": "before_near 与 before_far 需同时指定或同时省略"},
+                ensure_ascii=False,
+            )
+        if before_near is not None and before_far is not None:
+            if before_near < 1 or before_far <= before_near:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "需满足 1 <= before_near < before_far",
+                    },
+                    ensure_ascii=False,
+                )
+            fetch_count = before_far
+        else:
+            fetch_count = count
+
         history = await bot_api.get_group_msg_history(
-            group_id=str(group_id), count=count
+            group_id=str(group_id), count=fetch_count
         )
-        messages = []
-        for ev in history:
-            messages.append({
-                "sender": getattr(ev, "sender", {}).get("nickname", "unknown") if isinstance(getattr(ev, "sender", None), dict) else getattr(getattr(ev, "sender", None), "nickname", "unknown"),
-                "content": _cq_processor.process(getattr(ev, "raw_message", "")),
-                "time": getattr(ev, "time", 0),
-            })
-        return json.dumps(messages, ensure_ascii=False)
+        if before_near is not None and before_far is not None:
+            history = _slice_history_by_before_range(
+                history, before_near, before_far
+            )
+        return json.dumps(_events_to_messages(history), ensure_ascii=False)
     
     @mcp.tool()
     async def send_group_forward_msg(group_id: int, user_id: int, messages: list[str]) -> str:
@@ -218,22 +274,48 @@ def create_mcp_server(
         return f"已发送 {len(segments)} 条合并转发消息到群 {group_id}"
     
     @mcp.tool()
-    async def get_private_msg_history(user_id: int, count: int = 20) -> str:
+    async def get_private_msg_history(
+        user_id: int,
+        count: int = 20,
+        before_near: int | None = None,
+        before_far: int | None = None,
+    ) -> str:
         """
         如果需要获取更多的私聊历史，可以调用此工具获取私聊历史消息记录。
         user_id: 用户 ID
-        count: 获取的消息数量，默认 20（即最近20条消息）
-        返回 JSON 格式的消息列表。
+        count: 获取最近的消息数量，默认 20。仅在不指定 before_near / before_far 时生效。
+        before_near: 区间较近边界（距现在第几条），如 100 表示从第 100 条前开始（含）。
+        before_far: 区间较远边界（距现在第几条），如 200 表示到第 200 条前为止（含）。
+        指定 before_near 与 before_far 时，返回 [before_near, before_far] 区间内的消息
+        （例如 before_near=100, before_far=200 即第 100～200 条前的消息，共 101 条）。
+        返回 JSON 格式的消息列表，按时间从旧到新排列。
         """
-        history = await bot_api.get_friend_msg_history(user_id=str(user_id), count=count)
-        messages = []
-        for ev in history:
-            messages.append({
-                "sender": getattr(ev, "sender", {}).get("nickname", "unknown") if isinstance(getattr(ev, "sender", None), dict) else getattr(getattr(ev, "sender", None), "nickname", "unknown"),
-                "content": _cq_processor.process(getattr(ev, "raw_message", "")),
-                "time": getattr(ev, "time", 0),
-            })
-        return json.dumps(messages, ensure_ascii=False)
+        if (before_near is None) ^ (before_far is None):
+            return json.dumps(
+                {"ok": False, "error": "before_near 与 before_far 需同时指定或同时省略"},
+                ensure_ascii=False,
+            )
+        if before_near is not None and before_far is not None:
+            if before_near < 1 or before_far <= before_near:
+                return json.dumps(
+                    {
+                        "ok": False,
+                        "error": "需满足 1 <= before_near < before_far",
+                    },
+                    ensure_ascii=False,
+                )
+            fetch_count = before_far
+        else:
+            fetch_count = count
+
+        history = await bot_api.get_friend_msg_history(
+            user_id=str(user_id), message_seq=0, count=fetch_count
+        )
+        if before_near is not None and before_far is not None:
+            history = _slice_history_by_before_range(
+                history, before_near, before_far
+            )
+        return json.dumps(_events_to_messages(history), ensure_ascii=False)
 
     # ─── 技能查询工具 ──────────────────────────────────────
 
@@ -337,5 +419,26 @@ def create_mcp_server(
             {"ok": False, "error": f"未找到属于当前会话的任务 '{task_id}'"},
             ensure_ascii=False,
         )
+
+    # ─── SubAgent 工具 ──────────────────────────────────────
+
+    if subagent_runner is not None:
+
+        @mcp.tool()
+        async def dispatch_subagent(task: str) -> str:
+            """把一个独立子任务交给 subagent 处理，返回它的报告（你只会看到最终报告，看不到中间过程）。
+
+            适合用于：
+            - 超长历史分段总结：分别派发"总结某会话第 X-Y 条消息"，再汇总各份报告。
+            - 需要大量读取 / 搜索调研、但你只需要结论的任务。
+
+            subagent 在隔离的上下文中运行，拥有读取历史、沙箱执行、查技能等工具，
+            但不能发消息、不能再派发 subagent。可在一轮内派发多个 dispatch_subagent，
+            它们会并行执行。
+
+            task: 对子任务的完整描述。务必写清数据指针（如"总结 group:123 最近 200 条里第 0-100 条"），
+                  以便 subagent 自行拉取数据，避免你把原始数据读进自己的上下文。
+            """
+            return await subagent_runner.run(task)
 
     return mcp

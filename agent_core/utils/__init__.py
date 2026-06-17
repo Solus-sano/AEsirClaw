@@ -1,3 +1,3 @@
-from agent_core.utils.multimodal import inject_multimodal
+from agent_core.utils.multimodal import build_multimodal_content
 
-__all__ = ["inject_multimodal"]
+__all__ = ["build_multimodal_content"]

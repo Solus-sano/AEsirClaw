@@ -157,10 +157,15 @@ class LLMClient:
         self,
         messages: List[ChatMessage],
         tools: list[dict] | None = None,
+        model: str | None = None,
     ) -> LLMResponse:
-        """调用聊天补全接口并返回统一响应结构。"""
+        """调用聊天补全接口并返回统一响应结构。
+
+        model: 可选的 per-call 模型覆写（如 subagent 用更便宜模型）。None 时用默认模型。
+        """
         payload = self._build_payload(messages)
-        kwargs: dict[str, Any] = {"model": self.model, "messages": payload}
+        effective_model = model or self.model
+        kwargs: dict[str, Any] = {"model": effective_model, "messages": payload}
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
         if tools:
@@ -184,7 +189,7 @@ class LLMClient:
         LLM_LOG.info(
             "model=%s | prompt_tokens=%s | completion_tokens=%s | "
             "tool_calls=%s | elapsed=%.0fms | has_content=%s",
-            self.model,
+            effective_model,
             prompt_tokens,
             completion_tokens,
             tool_names or "none",

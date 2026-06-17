@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 import yaml
 from pathlib import Path
 
-from agent_core.llm import ChatMessage
-from agent_core.utils import inject_multimodal
+from agent_core.backends.base import AgentRequest, ContentPart
+from agent_core.utils.multimodal import build_multimodal_content
 from ncatbot.utils import get_log
 import json
 import frontmatter
@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from agent_core.controller import AgentController
     from agent_core.memory.long_term import LongTermMemory
     from agent_core.memory.short_term import ShortTermMemory
+    from agent_core.tools.provider import ToolProvider
     from agent_core.trigger import TriggerManager
 
 LOG = get_log(__name__)
@@ -81,7 +82,9 @@ class MessagePipeline:
         trigger: TriggerManager,
         long_term_memory: LongTermMemory,
         persona: dict,
+        tool_provider: "ToolProvider",
         *,
+        max_iterations: int = 10,
         context_short_term_messages: int = 100,
         extraction_threshold: int = 200,
     ):
@@ -89,6 +92,8 @@ class MessagePipeline:
         self.memory = memory
         self.trigger = trigger
         self.long_term_memory = long_term_memory
+        self.tool_provider = tool_provider
+        self.max_iterations = max_iterations
         self.extraction_threshold = extraction_threshold
         self.context_short_term_messages = context_short_term_messages
         self.persona_str = json.dumps(persona, ensure_ascii=False)
@@ -129,44 +134,37 @@ class MessagePipeline:
 
         LOG.info("触发响应 [%s]: %s", context_id, trigger_result.reason)
 
-        # 3. 组装 messages
-        messages = self._build_context(context_id)
-        messages = await inject_multimodal(messages)
+        # 3. 组装请求（system_prompt + 中立多模态 user_content）
+        system_prompt, user_content = await self._build_request(context_id)
+        req = AgentRequest(
+            system_prompt=system_prompt,
+            user_content=user_content,
+            tools=self.tool_provider,
+            max_iterations=self.max_iterations,
+        )
 
         # 4. 调用 Agent Loop（消息发送在 loop 内通过工具完成）
-        await self.controller.run(messages)
+        await self.controller.run(req)
 
         # 5. 记录冷却时间。定时触发是机器人主动行为，与用户消息的防打扰
         #    冷却相互独立，不刷新冷却计时（避免抑制随后用户消息的正常响应）。
         if not is_scheduled:
             self.trigger.record_response(context_id)
 
-    def _build_context(self, context_id: str) -> list[ChatMessage]:
-        """拼装 system prompt + 长期记忆 + 短期记忆。"""
-        messages: list[ChatMessage] = []
-
-        # System prompt
-        messages.append(ChatMessage(role="system", content=self.system_prompt))
-
-        # 注入上下文信息（group_id / user_id）
+    async def _build_request(self, context_id: str) -> tuple[str, list[ContentPart]]:
+        """拼装 system_prompt（人格 + 上下文信息）与中立多模态 user_content（聊天记录）。"""
+        # System prompt：人格 + 当前上下文信息（group_id / user_id）合并为单条
+        system_prompt = self.system_prompt
         context_info = self._build_context_info(context_id)
         if context_info:
-            messages.append(ChatMessage(role="system", content=context_info))
+            system_prompt = f"{system_prompt}\n{context_info}"
 
-        # 长期记忆
-        # long_term_str = self.long_term_memory.get_summary_str(context_id)
-        # if long_term_str:
-        #     messages.append(ChatMessage(role="user", content=long_term_str))
-
-        # 短期记忆
+        # 短期记忆 → 渲染为聊天记录文本，再构造中立多模态内容
         mem_str = self.memory.get_recent_str(context_id, self.context_short_term_messages)
-        messages.append(ChatMessage(
-            role="user",
-            content=f"以下为群聊或私聊屏幕上的聊天记录：\n{mem_str}",
-        ))
-
-        print(f"\033[92m[DEBUG] messages: {messages}\033[0m")
-        return messages
+        user_content = await build_multimodal_content(
+            f"以下为群聊或私聊屏幕上的聊天记录：\n{mem_str}"
+        )
+        return system_prompt, user_content
 
     @staticmethod
     def _build_context_info(context_id: str) -> str:

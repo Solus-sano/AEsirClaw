@@ -9,7 +9,7 @@ from typing import List
 import aiohttp
 from PIL import Image
 
-from agent_core.llm import ChatMessage
+from agent_core.backends.base import ContentPart, ImagePart, TextPart
 from ncatbot.utils import get_log
 
 LOG = get_log(__name__)
@@ -56,57 +56,39 @@ async def _download_and_resize(url: str, max_side: int = 224) -> str | None:
         return None
 
 
-async def inject_multimodal(messages: List[ChatMessage]) -> List[ChatMessage]:
-    """扫描消息列表，将含 [IMG:url] 标记的消息转换为多模态格式。
+async def build_multimodal_content(text: str) -> List[ContentPart]:
+    """把一段含 [IMG:url] 标记的文本构造为中立的多模态 ContentPart 列表。
 
-    按原始位置交替插入 text / image_url，保留图文顺序；
+    按原始位置交替产出 TextPart / ImagePart，保留图文顺序；
     下载失败的图片降级为文本 [图片]；
-    若全部图片均失败，整条消息退化为纯文本字符串。
+    若不含图片或全部图片均失败，退化为单个 TextPart。
+
+    返回中立结构，由各 backend 自行渲染为其 wire 格式（OpenAI / SDK 等）。
     """
-    result: List[ChatMessage] = []
-    for msg in messages:
-        # 跳过非文本 / 不含图片标记的消息
-        if not isinstance(msg.content, str) or not _IMG_PATTERN.search(msg.content):
-            result.append(msg)
-            continue
+    if not _IMG_PATTERN.search(text):
+        return [TextPart(text=text)]
 
-        # re.split 带捕获组 → 交替产生 [文本, url, 文本, url, 文本]
-        parts = _IMG_PATTERN.split(msg.content)
-        # parts[0], parts[2], ... 是文本片段
-        # parts[1], parts[3], ... 是图片 URL
+    # re.split 带捕获组 → 交替产生 [文本, url, 文本, url, 文本]
+    parts = _IMG_PATTERN.split(text)
+    urls = parts[1::2]
+    data_urls = await asyncio.gather(*[_download_and_resize(u) for u in urls])
 
-        # 收集所有 URL，并发下载
-        urls = parts[1::2]
-        data_urls = await asyncio.gather(*[_download_and_resize(u) for u in urls])
-
-        # 按原始顺序交替构建 content_parts
-        content_parts: List[dict] = []
-        img_idx = 0
-        for i, part in enumerate(parts):
-            if i % 2 == 0:
-                # 文本片段（可能为空字符串，跳过）
-                if part:
-                    content_parts.append({"type": "text", "text": part})
-            else:
-                # 图片片段
-                content_parts.append(
-                    {"type": "text", "text": f"{part}"}
-                )
-                if data_urls[img_idx] is not None:
-                    content_parts.append({
-                        "type": "image_url",
-                        "image_url": {"url": data_urls[img_idx]},
-                    })
-                else:
-                    content_parts.append({"type": "text", "text": "[图片]"})
-                img_idx += 1
-
-        # 全部图片都失败 → 退化为纯文本
-        has_image = any(p["type"] == "image_url" for p in content_parts)
-        if not has_image:
-            clean_text = _IMG_PATTERN.sub("[图片]", msg.content)
-            result.append(ChatMessage(role=msg.role, content=clean_text))
+    content_parts: List[ContentPart] = []
+    img_idx = 0
+    for i, part in enumerate(parts):
+        if i % 2 == 0:
+            if part:
+                content_parts.append(TextPart(text=part))
         else:
-            result.append(ChatMessage(role=msg.role, content=content_parts))
+            # 保留原始 URL 文本片段，再附图片
+            content_parts.append(TextPart(text=f"{part}"))
+            if data_urls[img_idx] is not None:
+                content_parts.append(ImagePart(url=data_urls[img_idx]))
+            else:
+                content_parts.append(TextPart(text="[图片]"))
+            img_idx += 1
 
-    return result
+    has_image = any(isinstance(p, ImagePart) for p in content_parts)
+    if not has_image:
+        return [TextPart(text=_IMG_PATTERN.sub("[图片]", text))]
+    return content_parts

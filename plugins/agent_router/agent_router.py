@@ -16,6 +16,7 @@ from ncatbot.utils.assets.literals import OFFICIAL_STARTUP_EVENT
 import time
 
 from agent_core.config import AppConfig
+from agent_core.backends import NativeLoopBackend
 from agent_core.controller import AgentController
 from agent_core.debouncer import Debouncer
 from agent_core.llm import LLMClient
@@ -24,9 +25,11 @@ from agent_core.memory.short_term import MemoryMessage, ShortTermMemory
 from agent_core.output import MessageOutputter
 from agent_core.pipeline import MessagePipeline
 from agent_core.scheduler import TaskScheduler
+from agent_core.subagent import SubAgentRunner
 from agent_core.trigger import TriggerManager
 from agent_core.tools import create_mcp_server
 from agent_core.tools.docker_executor import DockerExecutor
+from agent_core.tools.provider import McpConnection, McpToolProvider
 
 LOG = get_log(__name__)
 
@@ -74,12 +77,19 @@ class AgentRouterPlugin(NcatBotPlugin):
             storage_dir=memory_cfg.get("summaries_dir", "memory/summaries"),
         )
         self.max_iterations = int(llm_cfg.get("max_iterations", 10))
+        self.subagent_max_iterations = int(llm_cfg.get("subagent_max_iterations", 8))
         self.context_short_term_messages = int(memory_cfg.get("context_short_term_messages", 100))
         self.extraction_threshold = int(memory_cfg.get("extraction_threshold", 200))
         self.executor = DockerExecutor()
 
+        # 共享的 Agent 推理核心（无状态，可被所有 context 复用）。
+        # 未来切换 Pi / Claude Code 时只需替换这里的 backend。
+        self.controller = AgentController(NativeLoopBackend(self.llm))
+
         self._load_routing_config()
         self._pipeline_cache: dict[str, MessagePipeline] = {}
+        # 每 context 一个 in-memory MCP 连接（保留闭包焊死 context_id 的隔离）
+        self._connections: list[McpConnection] = []
 
         self.debouncer = Debouncer(delay=5.0)
 
@@ -109,6 +119,12 @@ class AgentRouterPlugin(NcatBotPlugin):
         LOG.info("历史消息加载完成。")
         # 在 bot 主 event loop 上启动调度器（此回调即运行于该 loop）
         self.scheduler.start()
+
+    async def on_unload(self):
+        """卸载时尽力关闭各 context 的 in-memory MCP 连接。"""
+        for conn in self._connections:
+            await conn.aclose()
+        self._connections.clear()
 
     async def _load_recent_messages(self) -> None:
         count = self.init_short_term_messages
@@ -192,7 +208,7 @@ class AgentRouterPlugin(NcatBotPlugin):
 
     async def _safe_handle(self, context_id: str, **kwargs) -> None:
         try:
-            pipeline = self._get_pipeline(context_id)
+            pipeline = await self._get_pipeline(context_id)
             await pipeline.handle(context_id, **kwargs)
         except Exception as exc:
             LOG.error("处理消息失败 [%s]: %s\n%s", context_id, exc, traceback.format_exc())
@@ -279,7 +295,7 @@ class AgentRouterPlugin(NcatBotPlugin):
         with path.open("r", encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
 
-    def _get_pipeline(self, context_id: str) -> MessagePipeline:
+    async def _get_pipeline(self, context_id: str) -> MessagePipeline:
         cached = self._pipeline_cache.get(context_id)
         if cached is not None:
             return cached
@@ -297,6 +313,13 @@ class AgentRouterPlugin(NcatBotPlugin):
         )
 
         bot_name = persona.get("core", {}).get("name", "Bot")
+
+        # SubAgent runner：工具供给延迟绑定（破循环依赖：server→session→provider→runner）
+        subagent_runner = SubAgentRunner(
+            self.controller,
+            max_iterations=self.subagent_max_iterations,
+        )
+
         mcp = create_mcp_server(
             outputter=outputter,
             bot_api=self.api,
@@ -305,13 +328,15 @@ class AgentRouterPlugin(NcatBotPlugin):
             executor=self.executor,
             scheduler=self.scheduler,
             context_id=context_id,
+            subagent_runner=subagent_runner,
         )
 
-        controller = AgentController(
-            llm=self.llm,
-            mcp=mcp,
-            max_iterations=self.max_iterations,
-        )
+        # 每 context 一个长生命周期 in-memory MCP 连接
+        connection = McpConnection(mcp)
+        session = await connection.start()
+        self._connections.append(connection)
+        tool_provider = McpToolProvider(session)
+        subagent_runner.bind_provider(tool_provider)
 
         trigger = TriggerManager(
             bot_qq=self.bot_qq,
@@ -321,11 +346,13 @@ class AgentRouterPlugin(NcatBotPlugin):
         )
 
         pipeline = MessagePipeline(
-            controller=controller,
+            controller=self.controller,
             memory=self.memory,
             trigger=trigger,
             long_term_memory=self.long_term_memory,
             persona=persona,
+            tool_provider=tool_provider,
+            max_iterations=self.max_iterations,
             context_short_term_messages=self.context_short_term_messages,
             extraction_threshold=self.extraction_threshold,
         )

@@ -253,6 +253,8 @@ AEsirClaw/
 - [x] **定时任务触发** — Agent 可主动设置或移除定时任务（支持 once / interval / daily，文件持久化）。
 - [ ] **更多 Skill 和 MCP 工具** — 接入系统文件管理、音视频流式处理等高级工具能力。
 
+- [x] **subagent** — Agent 可以调用 SubAgent 来完成复杂任务。
+
 ## Acknowledgement
 
 - Opus 4.6
