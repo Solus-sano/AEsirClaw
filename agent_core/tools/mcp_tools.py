@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import time
@@ -125,6 +126,44 @@ def create_mcp_server(
         for seg in messages:
             _record_bot_msg(ctx, seg)
         return f"已发送 {len(messages)} 条私聊消息给 {user_id}"
+
+    @mcp.tool()
+    async def send_group_record(group_id: int, path: str) -> str:
+        """向 QQ 群发送语音消息（以 base64 方式上传本地语音文件）。
+
+        path: /workspace/ 下的本地语音文件路径（如：tmp/record/***.wav）
+              一般会由 NapCat 自动转码，若失败请先用 execute_task 借助 ffmpeg 转码。
+        """
+        abs_path = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path}")
+        if not os.path.exists(abs_path):
+            return json.dumps(
+                {"ok": False, "error": f"语音文件不存在: {path}"}, ensure_ascii=False
+            )
+        with open(abs_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+        await bot_api.send_group_record(group_id=str(group_id), file=f"base64://{encoded}")
+        ctx = f"group:{group_id}"
+        _record_bot_msg(ctx, "[语音]")
+        return f"已发送语音到群 {group_id}"
+
+    @mcp.tool()
+    async def send_private_record(user_id: int, path: str) -> str:
+        """向 QQ 用户发送私聊语音消息（以 base64 方式上传本地语音文件）。
+
+        path: /workspace/ 下的本地语音文件路径（如：tmp/record/***.wav）
+              一般会由 NapCat 自动转码，若失败请先用 execute_task 借助 ffmpeg 转码。
+        """
+        abs_path = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path}")
+        if not os.path.exists(abs_path):
+            return json.dumps(
+                {"ok": False, "error": f"语音文件不存在: {path}"}, ensure_ascii=False
+            )
+        with open(abs_path, "rb") as f:
+            encoded = base64.b64encode(f.read()).decode("utf-8")
+        await bot_api.send_private_record(user_id=str(user_id), file=f"base64://{encoded}")
+        ctx = f"private:{user_id}"
+        _record_bot_msg(ctx, "[语音]")
+        return f"已发送语音给用户 {user_id}"
 
     @mcp.tool()
     async def send_group_media(
