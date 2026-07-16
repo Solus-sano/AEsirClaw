@@ -5,21 +5,27 @@
 AEsirClaw 是一款专为 QQ 场景打造的轻量化 Agent。最初为了学习 [OpenClaw](https://github.com/openclaw/openclaw) 的思路，基于 QQ 协议搭建了这个轻量化 AI 助手，将强大的 Agent 决策能力引入日常群聊与私聊中，以 [NcatBot](https://github.com/liyihao1110/NcatBot) 为接入层，追求极致的「拟真交互」体验。
 
 **核心亮点：**
-- **Agent 驱动**：行为逻辑由 LLM Agent Loop 全权托管。
+- **Agent 驱动**：行为逻辑由 LLM Agent Loop 全权托管，推理内核（`AgentBackend`）可插拔替换。
 - **沙箱隔离**：内置 Docker 容器，安全执行各类 Python/Shell 任务。
-- **高可扩展性**：支持自定义 Skill 机制与 MCP 工具生态。
+- **高可扩展性**：支持自定义 Skill 机制与标准 MCP 工具生态。
+- **多智能体协作**：主 Agent 可派发 SubAgent 并行处理子任务，上下文隔离、互不干扰。
 - **极致轻量化**：告别重型初始设定，初始 System Prompt 控制在 2k tokens 以下。适用于学习思路
 
 ## Features
 
 - **Agent Loop 架构** — 基于 Tool Calling 的循环决策引擎，隐藏 LLM 思考过程（`content` 字段静默），所有最终输出严格通过工具调用触发。
+- **可插拔推理后端** — `AgentController` 稳定门面 + `AgentBackend` 抽象协议解耦推理实现，现有 `NativeLoopBackend`（手写 Tool Calling Loop，同轮多工具调用并行执行），并为 Pi Agents SDK / Claude Code Agent SDK 预留接入位。
+- **SubAgent 协作** — 主 Agent 可将独立子任务（如超长历史分段总结）派发给上下文隔离的 SubAgent，只读工具白名单防递归/防误发消息，多个 SubAgent 可并行执行。
+- **标准 MCP 工具层** — 基于官方 `mcp` client/server 协议（in-memory transport）实现工具调用，`ToolProvider` 抽象屏蔽底层细节，支持按需裁剪工具集。
 - **Docker 沙箱执行** — 长驻容器配合 `docker exec`，安全执行网络搜索、爬虫、代码求值等高风险操作。
 - **动态 Skill 体系** — 基于 Markdown 文档 + CLI 脚本，赋予 Agent 运行时发现和学习新能力的可能性，个人开发者可极简定制。
 - **拟人化输出** — 文本动态分段发送 + 模拟真实打字延迟，还原人类聊天节奏。
 - **智能触发系统** — 支持 @强制触发 与灵活的冷却时间控制，兼顾响应及时性与防打扰。
 - **事件防抖机制** — 并发消息合并处理，模拟「听完再说」的人类习惯，拒绝逐条机械响应。
+- **定时任务系统** — Agent 可自主设定 once / interval / daily 定时任务，到点后主动唤醒自己在原会话行动，文件持久化并支持停机补偿。
 - **多模态理解** — 支持图片、文件、视频流的发送与内容解析。
 - **人格驱动** — 外部 YAML 文件定义完整人格画像（性格特征、行为准则、禁忌事项）。
+- **多人格路由** — 支持按群号/用户号映射到不同命名配置，人格、触发策略、输出节奏均可独立覆写。
 
 ## Agent Pipeline
 
@@ -30,21 +36,56 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
            Pipeline (触发判断 → 组装上下文)
                 │
                 ▼
-        ┌─ Controller (Agent Loop) ◄──► LLM API
+        ┌─ AgentController (稳定 Façade)
         │       │
         │       ▼
-        │   FastMCP 工具路由
+        │   AgentBackend「可插拔」 ◄──► LLM API
+        │     NativeLoopBackend：手写 Tool Calling Loop
+        │     （同轮多工具调用并行执行；预留 Pi / Claude Code SDK 接入位）
+        │       │
+        │       ▼
+        │   ToolProvider（MCP client/server 工具路由）
         │     ├── send_group_msg / send_private_msg  → QQ
         │     ├── send_group_media / send_private_media → QQ
         │     ├── execute_task → Docker 沙箱
         │     ├── get_skill → Skill 文档查询
         │     ├── *_scheduled_task → TaskScheduler（定时任务）
-        │     └── get_*_msg_history → 历史消息查询
+        │     ├── get_*_msg_history → 历史消息查询（支持区间分页）
+        │     └── dispatch_subagent → SubAgentRunner（只读白名单 + 隔离上下文，可并行）
         │
         └─ Docker 容器
               ├── /skills/  (只读挂载，Skill 脚本)
               └── /workspace/ (读写挂载，工作区)
 ```
+
+## Agent 推理内核
+
+```text
+AgentController          # 稳定 Façade，外部（Pipeline / SubAgent）只认这一层
+  └── AgentBackend       # 中立协议：run(AgentRequest) -> RunResult
+        ├── NativeLoopBackend   # 现有实现：手写 Tool Calling Loop
+        ├── PiBackend           # 预留：接入 Pi Agents SDK
+        └── ClaudeCodeBackend   # 预留：接入 Claude Code Agent SDK
+```
+
+**稳定契约**：`AgentController` 本身不实现推理逻辑，只把请求委派给可插拔的 `AgentBackend`。`AgentRequest`（`system_prompt` + 中立多模态 `user_content` + `tools`）与 `RunResult`（`final_text` + `stop_reason`）是两者之间唯一的接口，不绑定 OpenAI messages 格式，为将来平替底层推理实现（如接入支持会话 resume 的 Pi / Claude Code SDK）铺路，且不影响 Pipeline / SubAgent 等调用方。
+
+**NativeLoopBackend**：当前唯一落地的 Backend，是一个手写的 Tool Calling 循环——每轮调用 LLM，若返回 `tool_calls` 则并行执行（`asyncio.gather`，结果按原顺序回填），直至无 tool_call 或达到 `max_iterations`。
+
+**标准 MCP 工具层**：工具调用改为基于官方 `mcp` 库的 client/server 协议（in-memory transport），不再直接访问 FastMCP 内部实现。`ToolProvider` 是唯一对接 Backend 的抽象：
+- `McpToolProvider` — 包装已连接的 MCP `ClientSession`，对外暴露 `list_schemas()` / `call()`。
+- `FilteredToolProvider` — 白名单视图，用于裁剪 SubAgent 可见的工具集。
+- `McpConnection` — 长生命周期的 in-memory server+client 连接管理（后台 keeper task，规避 anyio cancel-scope 跨任务退出的限制）。
+
+## SubAgent 协作
+
+主 Agent 可以通过 `dispatch_subagent` 工具，把独立子任务派发给一个上下文隔离的 SubAgent 处理——调用方只看到最终报告、看不到中间过程。典型场景是超长聊天记录的分段总结：`summary` Skill 在消息量较大时会拆成多个"总结第 X-Y 条"的子任务并行派发，再汇总各份报告，避免把原始数据读进主 Agent 的上下文。
+
+**设计要点：**
+- **只读工具白名单** — SubAgent 仅能使用 `execute_task` / `get_group_msg_history` / `get_private_msg_history` / `get_skill`，结构上拿不到 `send_*` / `dispatch_subagent` / 定时任务工具，天然防递归、防越权发消息。
+- **指针式任务** — 主 Agent 只需下达"总结 group:123 第 0-100 条"这类指针任务，由 SubAgent 自行调用工具拉取大块数据，从而不占用主 Agent 的上下文。
+- **并行执行** — 得益于 Agent Loop 内工具调用的并行化，单轮可派发多个 `dispatch_subagent`，它们会并发执行。
+- **复用同一套推理内核** — SubAgent 只是 `AgentController` 的"另一次 run"，与主 Agent 共享 Backend 实现，无需额外维护一套推理逻辑。
 
 ## 拟人化策略
 
@@ -156,14 +197,20 @@ uv run python main.py
 
 ```yaml
 llm:
+  provider: moonshot                       # 服务商标识（当前仅作说明用途）
   model: kimi-k2.5
   model_base_url: https://api.moonshot.cn/v1
   api_key: Your-API-Key
-  max_iterations: 500                      # Agent Loop 最大迭代次数
+  max_iterations: 500                      # 主 Agent Loop 最大迭代次数
+  subagent_max_iterations: 8               # SubAgent 每次 run 的最大迭代次数
 
 memory:
   init_short_term_messages: 30             # 冷启动加载的历史上下文容量
   context_short_term_messages: 30          # 每次 Prompt 注入的最大上下文窗口
+  short_term_queue_size: 500               # 每个 context 的短期记忆队列上限
+
+scheduler:
+  scan_interval: 20.0                      # 定时任务扫描间隔 (s)，详见「定时任务系统」
 
 routing:
   defaults:
@@ -225,7 +272,11 @@ AEsirClaw/
 │   └── example_personal.yaml         # Persona Definition (example)
 ├── agent_core/                      # Agent Runtime
 │   ├── config.py                    # Config Validator & Manager
-│   ├── controller.py                # Agent Loop (Tool Calling Engine)
+│   ├── controller.py                # AgentController（稳定 Façade，委派给 Backend）
+│   ├── backends/                    # 可插拔推理后端
+│   │   ├── base.py                  # AgentBackend 协议 / AgentRequest & RunResult 契约
+│   │   └── native_loop.py           # NativeLoopBackend（手写 Tool Calling Loop）
+│   ├── subagent.py                  # SubAgent Runner（只读工具白名单，隔离上下文）
 │   ├── pipeline.py                  # Event Pipeline
 │   ├── llm.py                       # LLM Facade
 │   ├── trigger.py                   # Trigger Logic
@@ -233,7 +284,8 @@ AEsirClaw/
 │   ├── scheduler.py                 # Scheduled Task Engine
 │   ├── output.py                    # Output Streamer
 │   ├── tools/
-│   │   ├── mcp_tools.py             # FastMCP Router
+│   │   ├── mcp_tools.py             # MCP 工具注册（FastMCP Server）
+│   │   ├── provider.py              # ToolProvider 抽象（MCP client 封装 / 白名单视图）
 │   │   └── docker_executor.py       # Sandbox Executor
 │   ├── memory/                      # Memory Systems
 │   └── utils/
@@ -252,8 +304,9 @@ AEsirClaw/
 - [ ] **记忆系统** — 自动总结聊天记录，提取 high-level 语意的实体与事实，维护长效结构化记忆。
 - [x] **定时任务触发** — Agent 可主动设置或移除定时任务（支持 once / interval / daily，文件持久化）。
 - [ ] **更多 Skill 和 MCP 工具** — 接入系统文件管理、音视频流式处理等高级工具能力。
-
-- [x] **subagent** — Agent 可以调用 SubAgent 来完成复杂任务。
+- [x] **SubAgent** — Agent 可以调用 SubAgent 来完成复杂任务，支持并行派发与上下文隔离。
+- [x] **可插拔推理后端** — `AgentController` / `AgentBackend` 抽象重构，工具层迁移至标准 MCP client/server 协议。
+- [ ] **接入 Pi / Claude Code Agent SDK** — 作为 `NativeLoopBackend` 之外的可选 Backend 实现（接口已预留）。
 
 ## Acknowledgement
 
