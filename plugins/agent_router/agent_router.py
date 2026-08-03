@@ -15,6 +15,7 @@ from ncatbot.utils.assets.literals import OFFICIAL_STARTUP_EVENT
 
 import time
 
+from agent_core import tracing
 from agent_core.config import AppConfig
 from agent_core.backends import NativeLoopBackend
 from agent_core.controller import AgentController
@@ -72,6 +73,17 @@ class AgentRouterPlugin(NcatBotPlugin):
         )
 
         self.llm = LLMClient(self.cfg)
+
+        # ── 轨迹记录（数据回流）：按开关配置 sink，关闭时零开销 ────────
+        tracing_cfg = self.cfg.tracing
+        self._tracing_enabled = bool(tracing_cfg.get("enabled", False))
+        if self._tracing_enabled:
+            trace_dir = _PROJECT_DIR / str(tracing_cfg.get("dir", "data/traces"))
+            tracing.configure(tracing.JsonFileSink(trace_dir), enabled=True)
+            LOG.info("Agent 轨迹记录已开启，落盘目录: %s", trace_dir)
+        else:
+            tracing.configure(tracing.NullSink(), enabled=False)
+
         self.long_term_memory = LongTermMemory(
             self.llm,
             storage_dir=memory_cfg.get("summaries_dir", "memory/summaries"),
@@ -84,7 +96,9 @@ class AgentRouterPlugin(NcatBotPlugin):
 
         # 共享的 Agent 推理核心（无状态，可被所有 context 复用）。
         # 未来切换 Pi / Claude Code 时只需替换这里的 backend。
-        self.controller = AgentController(NativeLoopBackend(self.llm))
+        # 开启轨迹时，交给 backend 的是被包装的 LLMClient（长期记忆仍用原始 self.llm）。
+        backend_llm = tracing.TracingLLMClient(self.llm) if self._tracing_enabled else self.llm
+        self.controller = AgentController(NativeLoopBackend(backend_llm))
 
         self._load_routing_config()
         self._pipeline_cache: dict[str, MessagePipeline] = {}
@@ -336,6 +350,8 @@ class AgentRouterPlugin(NcatBotPlugin):
         session = await connection.start()
         self._connections.append(connection)
         tool_provider = McpToolProvider(session)
+        if self._tracing_enabled:
+            tool_provider = tracing.TracingToolProvider(tool_provider)
         subagent_runner.bind_provider(tool_provider)
 
         trigger = TriggerManager(

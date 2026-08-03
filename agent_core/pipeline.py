@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 import yaml
 from pathlib import Path
 
+from agent_core import tracing
 from agent_core.backends.base import AgentRequest, ContentPart
 from agent_core.utils.multimodal import build_multimodal_content
 from ncatbot.utils import get_log
@@ -144,7 +145,10 @@ class MessagePipeline:
         )
 
         # 4. 调用 Agent Loop（消息发送在 loop 内通过工具完成）
-        await self.controller.run(req)
+        #    trace_meta 只设置本次 run 的元信息，真正的 trace 建/收在 controller 内。
+        trigger_type = "scheduled" if is_scheduled else ("at" if is_at_me else "user")
+        with tracing.trace_meta(context_id, trigger_type):
+            await self.controller.run(req)
 
         # 5. 记录冷却时间。定时触发是机器人主动行为，与用户消息的防打扰
         #    冷却相互独立，不刷新冷却计时（避免抑制随后用户消息的正常响应）。

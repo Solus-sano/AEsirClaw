@@ -36,11 +36,20 @@ class ToolCall:
 
 @dataclass
 class LLMResponse:
-    """LLM 返回结构。"""
+    """LLM 返回结构。
+
+    prompt_tokens / completion_tokens / total_tokens / latency_ms 为可选观测字段，
+    供轨迹记录使用（默认 None，不影响原有调用方）。
+    """
 
     content: str
     tool_calls: List[ToolCall] = field(default_factory=list)
     raw_message: Dict[str, Any] = field(default_factory=dict)
+    reasoning_content: str | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    total_tokens: int | None = None
+    latency_ms: float | None = None
 
 
 class LLMClient:
@@ -179,25 +188,36 @@ class LLMClient:
         content = self._normalize_content(choice.content)
         tool_calls = self._parse_tool_calls(getattr(choice, "tool_calls", None))
         raw_message = self._dump_raw_message(choice)
+        reasoning_content = self._normalize_content(getattr(choice, "reasoning_content", None)) or None
 
         # ── 专用日志 ────────────────────────────────────────
         usage = getattr(completion, "usage", None)
-        prompt_tokens = getattr(usage, "prompt_tokens", "?") if usage else "?"
-        completion_tokens = getattr(usage, "completion_tokens", "?") if usage else "?"
+        prompt_tokens = getattr(usage, "prompt_tokens", None) if usage else None
+        completion_tokens = getattr(usage, "completion_tokens", None) if usage else None
+        total_tokens = getattr(usage, "total_tokens", None) if usage else None
         tool_names = [tc.function.name for tc in tool_calls] if tool_calls else []
 
         LLM_LOG.info(
             "model=%s | prompt_tokens=%s | completion_tokens=%s | "
             "tool_calls=%s | elapsed=%.0fms | has_content=%s",
             effective_model,
-            prompt_tokens,
-            completion_tokens,
+            prompt_tokens if prompt_tokens is not None else "?",
+            completion_tokens if completion_tokens is not None else "?",
             tool_names or "none",
             elapsed_ms,
             bool(content),
         )
 
-        return LLMResponse(content=content, tool_calls=tool_calls, raw_message=raw_message)
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            raw_message=raw_message,
+            reasoning_content=reasoning_content,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            latency_ms=elapsed_ms,
+        )
 
     @staticmethod
     def _build_payload(messages: List[ChatMessage]) -> list[dict]:

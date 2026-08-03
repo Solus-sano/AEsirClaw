@@ -18,6 +18,11 @@ scheduler:
   scan_interval: 20.0   # 定时任务扫描间隔（秒）。越小触发越精准，但更频繁唤醒；
                         # "每天HH:MM / 每隔N分钟" 这类需求 20s 足够。
 
+tracing:
+  enabled: false        # 是否记录 Agent 调用轨迹（数据回流）。关闭时运行时零开销。
+  dir: data/traces      # 轨迹落盘目录：按天建子文件夹，一条 trace 一个美化 JSON。
+                        # 仅写本地磁盘，不做任何联网上传。
+
 routing:
   defaults:
     persona_file: example_personal.yaml

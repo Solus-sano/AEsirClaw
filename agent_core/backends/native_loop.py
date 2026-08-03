@@ -122,7 +122,7 @@ class NativeLoopBackend:
                 return RunResult(final_text=final_text, stop_reason="completed", iterations=i + 1)
 
             messages.append(_assistant_message(response))
-            LOG.info(f"\033[92m[Agent Loop] 迭代 {i}: messages: {messages} \n\n \033[0m")
+            LOG.info(f"\033[92m[Agent Loop] 迭代 {i}: messages: {messages[-1]} \n\n \033[0m")
 
             # 同一轮的多个 tool_call 并行执行，结果按原顺序回填
             results = await asyncio.gather(

@@ -39,6 +39,10 @@ class AppConfig:
         return self._bot.get("scheduler", {})
 
     @property
+    def tracing(self) -> dict:
+        return self._bot.get("tracing", {})
+
+    @property
     def trigger(self) -> dict:
         return self._bot.get("trigger", {})
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Iterable
 
+from agent_core import tracing
 from agent_core.backends.base import AgentRequest, TextPart
 from agent_core.tools.provider import FilteredToolProvider
 
@@ -80,5 +81,10 @@ class SubAgentRunner:
             tools=tools,
             max_iterations=self._max_iterations,
         )
-        result = await self._controller.run(req)
+        # SubAgent 的 trace 继承父 trace 的 context_id，trigger_type 标记为 subagent；
+        # controller.run 内会读到父 trace 并自动挂成子树（parent_trace_id）。
+        parent = tracing.current_trace()
+        context_id = parent.context_id if parent else "subagent"
+        with tracing.trace_meta(context_id, "subagent"):
+            result = await self._controller.run(req)
         return result.final_text or "(subagent 未产出报告)"
