@@ -45,12 +45,13 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
         │       │
         │       ▼
         │   ToolProvider（MCP client/server 工具路由）
-        │     ├── send_group_msg / send_private_msg  → QQ
-        │     ├── send_group_media / send_private_media → QQ
+        │     ├── send_message  → QQ
+        │     ├── send_media → QQ
         │     ├── execute_task → Docker 沙箱
         │     ├── get_skill → Skill 文档查询
         │     ├── *_scheduled_task → TaskScheduler（定时任务）
-        │     ├── get_*_msg_history → 历史消息查询（支持区间分页）
+        │     ├── *_sticker → StickerStore （表情包相关）
+        │     ├── get_history → 历史消息导出 JSONL（支持区间分页）
         │     └── dispatch_subagent → SubAgentRunner（只读白名单 + 隔离上下文，可并行）
         │
         └─ Docker 容器
@@ -58,6 +59,15 @@ QQ 消息 ──→ Plugin (事件路由 + 防抖)
               └── /workspace/ (读写挂载，工作区)
 ```
 
+### 共享表情库
+
+所有使用同一项目 workspace 的机器人共享 `workspace/stickers/`：`images/` 保存原始图片（保留 GIF 动画），`index.json` 保存文件名 ID、SHA-256、caption、发送次数及时间戳（Unix 纳秒）。多进程通过文件锁协调，索引原子替换。
+
+- `save_sticker(source, caption, filename=None)`：从图片 URL 或 workspace 内文件收藏表情。caption 为 1–200 字的画面与情绪描述。默认以原文件名为 ID；URL 无有效文件名时传入 filename。同名不同内容自动加 `_2` 等后缀，相同 SHA-256 返回已有 ID，并保留原 caption。
+- `list_stickers()`：按最近使用排序返回 ID、caption、图片路径及发送次数；可用 `read_image(path)` 看图。浏览不刷新保留顺序。
+- `send_media(kind="sticker", source="猫猫.gif", target=None, caption=None)`：按库内 ID 发送 QQ 自定义表情（`image.sub_type=1`）。target 沿用 `group:ID` / `private:ID`，省略则发到当前会话。QQ 接口返回消息 ID 后才增加发送次数，并记录描述到聊天记忆。
+
+容量固定为 20 个。入库、重复收藏和成功发送均刷新 LRU；满库时从旧条目中淘汰最久未使用的一个，确保新表情入库。发送次数仅用于统计，不参与淘汰。文件按原始字节去重，因此压缩或转格式后的同图可能占用不同位置。单文件上限 20 MiB、2500 万像素。请通过工具维护表情库，避免直接修改索引和图片；多机部署需共享挂载同一目录。
 ## Agent 推理内核
 
 ```text
@@ -82,7 +92,7 @@ AgentController          # 稳定 Façade，外部（Pipeline / SubAgent）只�
 主 Agent 可以通过 `dispatch_subagent` 工具，把独立子任务派发给一个上下文隔离的 SubAgent 处理——调用方只看到最终报告、看不到中间过程。典型场景是超长聊天记录的分段总结：`summary` Skill 在消息量较大时会拆成多个"总结第 X-Y 条"的子任务并行派发，再汇总各份报告，避免把原始数据读进主 Agent 的上下文。
 
 **设计要点：**
-- **只读工具白名单** — SubAgent 仅能使用 `execute_task` / `get_group_msg_history` / `get_private_msg_history` / `get_skill`，结构上拿不到 `send_*` / `dispatch_subagent` / 定时任务工具，天然防递归、防越权发消息。
+- **只读工具白名单** — SubAgent 仅能使用 `execute_task` / `get_history` / `get_skill` / `read_image`，结构上拿不到 `send_*` / `dispatch_subagent` / 定时任务工具，天然防递归、防越权发消息。
 - **指针式任务** — 主 Agent 只需下达"总结 group:123 第 0-100 条"这类指针任务，由 SubAgent 自行调用工具拉取大块数据，从而不占用主 Agent 的上下文。
 - **并行执行** — 得益于 Agent Loop 内工具调用的并行化，单轮可派发多个 `dispatch_subagent`，它们会并发执行。
 - **复用同一套推理内核** — SubAgent 只是 `AgentController` 的"另一次 run"，与主 Agent 共享 Backend 实现，无需额外维护一套推理逻辑。
@@ -109,7 +119,7 @@ AgentController          # 稳定 Façade，外部（Pipeline / SubAgent）只�
         │
         ├── content 字段 → 内部思考，丢弃输出
         ├── execute_task  → 路由至 Docker 沙箱执行（搜索/计算/处理）
-        └── send_group_msg(messages=["段落1", "段落2"])
+        └── send_message(messages=["段落1", "段落2"])
                │
                ▼
             MessageOutputter 逐段发送
@@ -123,9 +133,21 @@ AgentController          # 稳定 Façade，外部（Pipeline / SubAgent）只�
 
 **防抖调度 (Debouncing)**：采用固定窗口而非滑动窗口——首条消息触发 5s 等待，期间的新消息仅刷新候选指针，不延长等待。同一 Context 严格串行执行：处理期间到达的新消息覆盖进入队列排队，执行完毕后再开启新一轮窗口。@ 消息拥有最高优先级，绕过防抖立即响应。
 
-**静默输出 (Silent Thought)**：LLM 返回的 `content` 字段被设计为 Agent 的内部状态（Internal Thought），不会触达用户侧。可见的回复必须通过 `send_group_msg` 或类似工具完成——这意味着 Agent 可以「选择沉默」，或自主决定在单次 Loop 中先执行搜索、再进行运算，最终只抛出结论。
+**静默输出 (Silent Thought)**：LLM 返回的 `content` 字段被设计为 Agent 的内部状态（Internal Thought），不会触达用户侧。可见的回复必须通过 `send_message` 或类似工具完成——这意味着 Agent 可以「选择沉默」，或自主决定在单次 Loop 中先执行搜索、再进行运算，最终只抛出结论。
 
 **打字节律 (Typing Simulation)**：受《崩坏·星穹铁道》npc聊天消息启发，发信工具底层封装了 `MessageOutputter`，动态计算文本段落间的延迟（`字数 × delay_per_char + 随机波动`），模拟真人的断句和输入节奏。
+
+### 统一 MCP 接口
+
+启用 SubAgent 时共 10 个工具。文本、媒体和历史工具共用 `target`：省略为当前会话，也可指定 `group:群号` 或 `private:QQ号`。
+
+- `send_message(messages, target=None, forward=False)`：默认逐段发送；`forward=True` 在群聊和私聊均生成合并转发，节点身份使用机器人 QQ 号，正文写入短期记忆。
+- `send_media(kind, source, target=None, caption=None)`：`kind` 为 `image/file/video/record`；本地文件使用 `/workspace/` 绝对路径，非语音也支持 URL。文件和语音的附言另发一条文本。
+- `get_history(target=None, limit=20, offset=0, output_path="/workspace/tmp_history.jsonl")`：跳过最近 `offset` 条，再取最多 `limit` 条，按旧到新覆盖写入 UTF-8 JSONL。每行含 `sender/content/time`；仅返回 `ok/path/count/target`，正文不进入 Agent 上下文。路径支持工作区内的绝对路径或相对路径，自动创建父目录；无消息时写入空文件。用 `execute_task` 读取文件做统计，输出汇总即可。并行任务请指定不同输出路径。例如 `limit=100, offset=100` 导出距现在第 101～200 条。
+
+`read_image(path="/workspace/example.png")` 将本地图片作为多模态输入提供给模型，主 Agent 和 SubAgent 均可使用。支持工作区内的绝对路径和相对路径，按实际内容识别格式并转换为 PNG，动图取首帧；文件上限 20 MiB、2500 万像素。模型需支持图片输入。MCP 图片结果在工具层保留为图片片段，由后端转换成 `image_url`（data URL），不会把 base64 当作普通文字送给模型。
+
+保留 `execute_task`、`get_skill`、三个定时任务工具及 `dispatch_subagent`。旧的分群聊／私聊工具名不再注册，更新后需重启机器人以重建 MCP 连接。
 
 ## 效果预览
 

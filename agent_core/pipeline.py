@@ -111,6 +111,7 @@ class MessagePipeline:
         *,
         is_at_me: bool = False,
         is_scheduled: bool = False,
+        bypass_cooldown: bool = False,
         message: str = "",
     ) -> None:
         """处理一次消息触发。
@@ -119,6 +120,7 @@ class MessagePipeline:
             context_id: 上下文 ID（group:xxx 或 private:xxx）
             is_at_me: 是否 @ 了机器人
             is_scheduled: 是否由定时任务调度器触发（机器人主动行为）
+            bypass_cooldown: 本批消息是否获得绕过冷却的资格
             message: 当前消息文本，用于触发判断
         """
         # 1. 检查长期记忆提取
@@ -132,6 +134,7 @@ class MessagePipeline:
             message=message,
             is_at_me=is_at_me,
             is_scheduled=is_scheduled,
+            bypass_cooldown=bypass_cooldown,
         )
 
         if not trigger_result.should_respond:

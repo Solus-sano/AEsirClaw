@@ -68,14 +68,16 @@ class TriggerManager:
         *,
         is_at_me: bool = False,
         is_scheduled: bool = False,
+        bypass_cooldown: bool = False,
     ) -> TriggerResult:
         """检查是否应该触发响应
         
         Args:
             context_id: 上下文ID，格式为 "group:xxx" 或 "private:xxx"
             message: 消息内容
-            is_at_me: 是否 @ 了机器人
+            is_at_me: 当前消息是否 @ 了机器人，仅用于描述触发原因
             is_scheduled: 是否由定时任务调度器触发（机器人主动行为）
+            bypass_cooldown: 本批消息包含 @，允许绕过冷却，不改变当前消息身份
             
         Returns:
             TriggerResult: 触发检查结果
@@ -91,9 +93,10 @@ class TriggerManager:
         if is_private:
             return TriggerResult(True, TriggerType.FORCED, "私聊消息")
         
-        # 2. 强制触发：@ 机器人
-        if is_at_me:
-            return TriggerResult(True, TriggerType.FORCED, "被@提及")
+        # 2. 本批绕过冷却；当前消息的 @ 身份只影响原因描述。
+        if bypass_cooldown:
+            reason = "被@提及" if is_at_me else "本批消息包含@，绕过冷却"
+            return TriggerResult(True, TriggerType.FORCED, reason)
         
         # 3. 关键词触发
         message_lower = message.lower()
@@ -154,4 +157,3 @@ class TriggerManager:
         cooldown = self._get_cooldown_seconds(context_id)
         remaining = cooldown - (time.time() - last_time)
         return max(0, remaining)
-

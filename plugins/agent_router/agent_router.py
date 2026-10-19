@@ -106,6 +106,7 @@ class AgentRouterPlugin(NcatBotPlugin):
         self._connections: list[McpConnection] = []
 
         self.debouncer = Debouncer(delay=5.0)
+        self._pending_cooldown_bypass: set[str] = set()
 
         # ── 定时任务调度器 ───────────────────────────────────
         # 注意：on_load 由框架在独立线程的临时 event loop 上执行
@@ -182,16 +183,13 @@ class AgentRouterPlugin(NcatBotPlugin):
             return
 
         is_at_me = self._check_at_me(event)
+        if is_at_me:
+            self._pending_cooldown_bypass.add(context_id)
 
-        # @ 强制触发：跳过防抖
-        # if is_at_me:
-        #     await self._safe_handle(context_id, is_at_me=True, message=text)
-        #     return
-
-        # 普通消息：走防抖
+        # 群聊统一防抖；候选消息可覆盖，但本批绕过冷却的资格保留。
         self.debouncer.schedule(
             context_id,
-            self._safe_handle(context_id, message=text),
+            self._handle_debounced_group(context_id, is_at_me=is_at_me, message=text),
         )
 
     # ── 私聊消息 ─────────────────────────────────────────────
@@ -219,6 +217,17 @@ class AgentRouterPlugin(NcatBotPlugin):
         )
 
     # ── 内部方法 ─────────────────────────────────────────────
+
+    async def _handle_debounced_group(
+        self, context_id: str, *, is_at_me: bool, message: str,
+    ) -> None:
+        # 首次 await 前消费标记；执行期间收到的 @ 属于下一批。
+        bypass_cooldown = context_id in self._pending_cooldown_bypass
+        self._pending_cooldown_bypass.discard(context_id)
+        await self._safe_handle(
+            context_id, is_at_me=is_at_me, message=message,
+            bypass_cooldown=bypass_cooldown,
+        )
 
     async def _safe_handle(self, context_id: str, **kwargs) -> None:
         try:
@@ -424,6 +433,4 @@ class AgentRouterPlugin(NcatBotPlugin):
 
     def _check_at_me(self, event) -> bool:
         at_lst = event.message.filter_at()
-        if not at_lst:
-            return False
-        return at_lst[0].qq == self.bot_qq
+        return any(str(at.qq) == str(self.bot_qq) for at in at_lst)

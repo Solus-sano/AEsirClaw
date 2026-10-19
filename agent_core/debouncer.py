@@ -23,6 +23,7 @@ class Debouncer:
         self._candidate: dict[str, Coroutine] = {}
         self._loops: dict[str, asyncio.Task] = {}
         self._is_processing: dict[str, bool] = {}
+        self._deadlines: dict[str, float] = {}
 
     def schedule(self, context_id: str, coro: Coroutine) -> None:
         """调度一个候选任务。
@@ -30,7 +31,11 @@ class Debouncer:
         如果 context 正在处理中，新任务排队等候（覆盖旧候选）。
         否则启动新的处理循环。
         """
+        previous = self._candidate.get(context_id)
+        if previous is not None:
+            previous.close()
         self._candidate[context_id] = coro
+        self._deadlines[context_id] = asyncio.get_running_loop().time() + self.delay
 
         if self._is_processing.get(context_id, False):
             LOG.debug("[%s] 正在处理中，候选任务已缓存", context_id)
@@ -50,9 +55,14 @@ class Debouncer:
         """持续消费候选任务，直到没有新任务为止。"""
         self._is_processing[context_id] = True
         try:
-            while True:
-                await asyncio.sleep(self.delay)
+            while context_id in self._candidate:
+                remaining = self._deadlines[context_id] - asyncio.get_running_loop().time()
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                    # 等待期间可能收到新消息，必须重新检查截止时间。
+                    continue
                 coro = self._candidate.pop(context_id, None)
+                self._deadlines.pop(context_id, None)
                 if coro is None:
                     break
                 try:
@@ -60,4 +70,9 @@ class Debouncer:
                 except Exception:
                     LOG.exception("[%s] 防抖任务执行异常", context_id)
         finally:
-            self._is_processing[context_id] = False
+            self._is_processing.pop(context_id, None)
+            self._loops.pop(context_id, None)
+            pending = self._candidate.pop(context_id, None)
+            if pending is not None:
+                pending.close()
+            self._deadlines.pop(context_id, None)
