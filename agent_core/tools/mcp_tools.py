@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+import aiohttp
 import frontmatter
 from mcp.server.fastmcp import FastMCP, Image as MCPImage
 from PIL import Image, ImageOps
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from agent_core.tools.docker_executor import BaseExecutor
     from ncatbot.core.api import BotAPI
     
+from agent_core.stickers import StickerStore
 from agent_core.memory.short_term import MemoryMessage, _cq_processor
 
 _SKILLS_DIR = Path(__file__).resolve().parent.parent.parent / "skills"
@@ -72,6 +74,7 @@ def create_mcp_server(
     哪个会话（在哪个群/私聊设置就在哪触发）。
     """
     mcp = FastMCP("AEsirClaw Agent Tools")
+    stickers = StickerStore(_PROJECT_DIR / "workspace")
 
     def _record_bot_msg(context_id: str, content: str) -> None:
         """将 bot 自己发送的消息写入短期记忆。"""
@@ -173,17 +176,69 @@ def create_mcp_server(
         return f"已发送 {len(segments)} 条{'合并转发' if forward else ''}消息到 {ctx}"
 
     @mcp.tool()
+    async def save_sticker(source: str, caption: str, filename: str | None = None) -> str:
+        """收藏图片/GIF 到所有机器人共享的表情库（最多 20 个，LRU 淘汰）。
+        source 为图片 URL 或 /workspace/ 本地路径；caption 是 1–200 字画面与情绪描述。
+        默认以原文件名为 ID；URL 无有效文件名时须传 filename。同名不同图自动加后缀。
+        按原文件 SHA-256 去重，重复收藏刷新 LRU，不增加发送次数、不覆盖原描述。
+        """
+        try:
+            data, name = await stickers.read_source(source, filename)
+            result = await asyncio.to_thread(stickers.save, data, name, caption)
+            return json.dumps(result, ensure_ascii=False)
+        except (OSError, ValueError, aiohttp.ClientError, TimeoutError) as exc:
+            return _error(f"收藏表情失败: {exc}")
+
+    @mcp.tool()
+    async def list_stickers() -> str:
+        """列出共享表情库，按最近使用排序；浏览不刷新 LRU。
+        返回 id、caption、path、use_count。需要看图时可把 path 交给 read_image。
+        """
+        try:
+            rows = await asyncio.to_thread(stickers.list)
+            return json.dumps([{
+                "id": row["id"], "caption": row["caption"],
+                "path": "/workspace/stickers/" + row["path"], "use_count": row["use_count"],
+            } for row in rows], ensure_ascii=False)
+        except (OSError, ValueError) as exc:
+            return _error(str(exc))
+
+    @mcp.tool()
     async def send_media(
-        kind: Literal["image", "file", "video", "record"],
+        kind: Literal["image", "file", "video", "record", "sticker"],
         source: str, target: str | None = None, caption: str | None = None,
     ) -> str:
         """发送媒体。source 为 /workspace/ 文件路径或 URL（语音仅本地文件）。
+        kind="sticker" 时 source 为 list_stickers 返回的表情 ID（文件名），成功发送才计数。
         target 为 group:ID / private:ID，省略用当前会话；caption 为附言。
         """
         try:
             chat_kind, identifier, ctx = _resolve_target(target)
         except ValueError as exc:
             return _error(str(exc))
+        if kind == "sticker":
+            try:
+                sticker, data = await asyncio.to_thread(stickers.snapshot, source)
+            except (OSError, ValueError) as exc:
+                return _error(str(exc))
+            message = [{"type": "image", "data": {
+                "file": "base64://" + base64.b64encode(data).decode("ascii"),
+                "sub_type": 1, "summary": "[动画表情]",
+            }}]
+            if caption:
+                message.insert(0, {"type": "text", "data": {"text": caption}})
+            recipient = {("group_id" if chat_kind == "group" else "user_id"): identifier}
+            message_id = await getattr(bot_api, f"send_{chat_kind}_msg")(**recipient, message=message)
+            if not message_id or str(message_id) in {"None", "0"}:
+                return _error("表情发送未返回消息 ID，未增加使用次数")
+            label = f"[表情包: {sticker['caption']}]"
+            _record_bot_msg(ctx, f"{caption} {label}" if caption else label)
+            try:
+                updated = await asyncio.to_thread(stickers.mark_sent, sticker)
+            except (OSError, ValueError) as exc:
+                # 已发送不可报告成发送失败，避免模型重试造成重复消息。
+                return f"已发送{label}到 {ctx}，但使用统计保存失败: {exc}；请勿重发"
+            return f"已发送{label}到 {ctx}" + ("（表情已被淘汰，未更新统计）" if not updated else "")
         is_url = source.startswith(("https://", "http://"))
         if kind == "record" and is_url:
             return _error("语音仅支持 /workspace/ 下的本地文件")

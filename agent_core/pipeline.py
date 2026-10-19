@@ -48,6 +48,11 @@ def build_system_prompt(persona_str: str, skills_str: str) -> str:
 当你认为无需回复时，不调用任何发送工具即可（等价于保持沉默）。
 尽量只调用一次 send_message 工具，以免造成信息轰炸。
 
+【共享表情库】
+可通过 save_sticker 收藏聊天图片原始 URL 或本地图片，并填写简短画面与情绪描述。
+用 list_stickers 查看已有表情，再用 send_media(kind="sticker", source=表情ID) 发送；需要查看原图时用 read_image。
+所有机器人共享最多 20 个表情，按最近收藏/发送淘汰；不要直接编辑表情库文件。
+
 【聊天记录格式说明】
 你收到的聊天记录每条格式为：
   [time=YYYY-MM-DD HH:MM] [QQ_ID=昵称] [msg=消息内容]
