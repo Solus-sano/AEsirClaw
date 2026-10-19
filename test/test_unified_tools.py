@@ -29,11 +29,11 @@ async def main():
     try:
         schemas = await provider.list_schemas()
         assert {s.name for s in schemas} == {
-            "send_message", "send_media", "get_history", "execute_task", "get_skill",
+            "send_message", "send_media", "get_history", "execute_task", "get_skill", "read_image",
             "add_scheduled_task", "list_scheduled_tasks", "remove_scheduled_task", "dispatch_subagent",
         }
         filtered = FilteredToolProvider(provider, include=DEFAULT_SUBAGENT_TOOLS)
-        assert {s.name for s in await filtered.list_schemas()} == {"execute_task", "get_history", "get_skill"}
+        assert {s.name for s in await filtered.list_schemas()} == {"execute_task", "get_history", "get_skill", "read_image"}
         assert "error" in json.loads(await filtered.call("send_message", {"messages": ["x"]}))
 
         await provider.call("send_message", {"messages": ["hello", "world"]})

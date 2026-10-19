@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 DEFAULT_SUBAGENT_TOOLS: set[str] = {
     "execute_task",
     "get_history",
+    "read_image",
     "get_skill",
 }
 

@@ -21,6 +21,8 @@ from agent_core.backends.base import (
     ImagePart,
     RunResult,
     TextPart,
+    ToolResult,
+    tool_result_text,
 )
 from agent_core.llm import ChatMessage, LLMClient
 from ncatbot.utils import get_log
@@ -128,13 +130,21 @@ class NativeLoopBackend:
             results = await asyncio.gather(
                 *[self._exec_tool(req, tc) for tc in response.tool_calls]
             )
-            for tc, result_str in zip(response.tool_calls, results):
-                messages.append(_tool_result_message(tc.id, result_str))
+            image_parts: list[ContentPart] = []
+            for tc, result in zip(response.tool_calls, results):
+                messages.append(_tool_result_message(tc.id, tool_result_text(result)))
+                if isinstance(result, list) and any(isinstance(p, ImagePart) for p in result):
+                    image_parts.append(TextPart(text=f"工具 {tc.function.name}（调用 {tc.id}）返回的图片内容："))
+                    image_parts.extend(result)
+            # Chat Completions 的 tool 消息保留文本；图片在全部 tool 回复之后
+            # 作为 user 多模态内容附加，避免打断并行 tool_call 的响应序列。
+            if image_parts:
+                messages.append(ChatMessage(role="user", content=_content_to_openai(image_parts)))
 
         LOG.warning("[Agent Loop] 达到最大迭代次数 %d，强制结束", req.max_iterations)
         return RunResult(final_text=final_text, stop_reason="max_iter", iterations=req.max_iterations)
 
-    async def _exec_tool(self, req: AgentRequest, tc) -> str:
+    async def _exec_tool(self, req: AgentRequest, tc) -> ToolResult:
         tool_name = tc.function.name
         try:
             tool_args = json.loads(tc.function.arguments)
@@ -150,5 +160,5 @@ class NativeLoopBackend:
             result_str = json.dumps({"error": str(exc)}, ensure_ascii=False)
             LOG.error("[Agent Loop] 工具 %s 执行失败: %s", tool_name, exc)
 
-        LOG.info("[Agent Loop] 工具 %s 返回: %s", tool_name, _truncate(result_str, 300))
+        LOG.info("[Agent Loop] 工具 %s 返回: %s", tool_name, _truncate(tool_result_text(result_str), 300))
         return result_str

@@ -16,6 +16,8 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
+from agent_core.backends.base import ContentPart, ImagePart, TextPart, ToolResult, tool_result_text
+
 from mcp import ClientSession
 from mcp.shared.memory import create_connected_server_and_client_session
 from ncatbot.utils import get_log
@@ -40,7 +42,7 @@ class ToolProvider(Protocol):
 
     async def list_schemas(self) -> list[ToolSchema]: ...
 
-    async def call(self, name: str, args: dict) -> str: ...
+    async def call(self, name: str, args: dict) -> ToolResult: ...
 
 
 def _extract_text(result) -> str:
@@ -69,11 +71,19 @@ class McpToolProvider:
             for t in resp.tools
         ]
 
-    async def call(self, name: str, args: dict) -> str:
+    async def call(self, name: str, args: dict) -> ToolResult:
         result = await self._session.call_tool(name, args)
         text = _extract_text(result)
         if getattr(result, "isError", False):
             return json.dumps({"error": text or "工具执行失败"}, ensure_ascii=False)
+        if any(block.type == "image" for block in result.content):
+            parts: list[ContentPart] = []
+            for block in result.content:
+                if block.type == "text":
+                    parts.append(TextPart(text=block.text))
+                elif block.type == "image":
+                    parts.append(ImagePart(url=f"data:{block.mimeType};base64,{block.data}"))
+            return parts
         return text
 
 
@@ -91,7 +101,7 @@ class FilteredToolProvider:
     async def list_schemas(self) -> list[ToolSchema]:
         return [s for s in await self._inner.list_schemas() if s.name in self._include]
 
-    async def call(self, name: str, args: dict) -> str:
+    async def call(self, name: str, args: dict) -> ToolResult:
         if name not in self._include:
             return json.dumps(
                 {"error": f"工具 '{name}' 在当前 subagent 中不可用"},

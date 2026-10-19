@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
+import io
 import json
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import frontmatter
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image as MCPImage
+from PIL import Image, ImageOps
 from ncatbot.utils import get_log
 
 if TYPE_CHECKING:
@@ -84,6 +87,35 @@ def create_mcp_server(
         if executor is None:
             return json.dumps({"ok": False, "error": "沙箱执行器未初始化"}, ensure_ascii=False)
         return await executor.execute(command)
+
+    @mcp.tool()
+    async def read_image(path: str) -> MCPImage:
+        """读取 /workspace/ 下的本地图片供模型查看，返回图片内容而非文字。动图取首帧。"""
+        def load() -> MCPImage:
+            workspace = (_PROJECT_DIR / "workspace").resolve()
+            if path.startswith("/workspace/"):
+                file_path = _PROJECT_DIR / path.lstrip("/")
+            else:
+                file_path = Path(path)
+                if not file_path.is_absolute():
+                    file_path = workspace / file_path
+            file_path = file_path.resolve()
+            if not file_path.is_relative_to(workspace):
+                raise ValueError("图片须位于 /workspace/ 下")
+            if not file_path.is_file():
+                raise ValueError(f"图片文件不存在: {path}")
+            if file_path.stat().st_size > 20 * 1024 * 1024:
+                raise ValueError("图片文件超过 20 MiB，请先缩小图片")
+            # 按实际图片内容解码，统一 PNG；不依赖扩展名判断格式。
+            with Image.open(file_path) as original:
+                if original.width * original.height > 25_000_000:
+                    raise ValueError("图片超过 2500 万像素，请先缩小图片")
+                img = ImageOps.exif_transpose(original).convert("RGBA")
+                buffer = io.BytesIO()
+                img.save(buffer, format="PNG")
+            return MCPImage(data=buffer.getvalue(), format="png")
+
+        return await asyncio.to_thread(load)
 
     # ─── QQ 工具：统一使用 group:ID / private:ID 定位会话 ───
 

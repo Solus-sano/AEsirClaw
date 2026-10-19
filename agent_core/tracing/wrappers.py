@@ -15,7 +15,7 @@ from agent_core.llm import ChatMessage, LLMClient, LLMResponse
 from agent_core.tracing import tracer
 from agent_core.tracing.models import _now_iso
 
-from agent_core.tools.provider import ToolProvider, ToolSchema
+from agent_core.tools.provider import ToolProvider, ToolSchema, ToolResult, tool_result_text
 
 
 class TracingLLMClient:
@@ -78,7 +78,7 @@ class TracingToolProvider:
     async def list_schemas(self) -> list[ToolSchema]:
         return await self._inner.list_schemas()
 
-    async def call(self, name: str, args: dict) -> str:
+    async def call(self, name: str, args: dict) -> ToolResult:
         started_at = _now_iso()
         t0 = time.monotonic()
         result = await self._inner.call(name, args)
@@ -89,8 +89,8 @@ class TracingToolProvider:
                 started_at=started_at,
                 elapsed_ms=elapsed_ms,
                 arguments=args,
-                result=result,
-                is_error=_looks_like_error(result),
+                result=tool_result_text(result),
+                is_error=_looks_like_error(tool_result_text(result)),
             )
         except Exception:  # noqa: BLE001, S110
             pass

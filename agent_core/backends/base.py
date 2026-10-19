@@ -31,6 +31,16 @@ class ImagePart:
 ContentPart = TextPart | ImagePart
 
 
+ToolResult = str | list[ContentPart]
+
+
+def tool_result_text(result: ToolResult) -> str:
+    """文本结果或多模态摘要，避免将 base64 写入日志和 tool 文本。"""
+    if isinstance(result, str):
+        return result
+    return "\n".join(p.text if isinstance(p, TextPart) else "[图片]" for p in result)
+
+
 @dataclass
 class Turn:
     """中立的会话轮次。为未来的 history / resume 预留，当前不使用。"""
