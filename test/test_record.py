@@ -8,7 +8,7 @@
    - 参数校验（空文本、越界权重）以退出码 1 结束
    - TTS 服务报错（HTTPError / 连不通）以退出码 1 结束
 
-2. MCP 工具 send_group_record / send_private_record
+2. MCP 工具 send_media(kind="record")
    - 本地文件被 base64 编码（base64:// 前缀）后交给 bot_api
    - 短期记忆写入 [语音]
    - 文件不存在时返回 ok=False，且不调用 bot_api
@@ -272,9 +272,9 @@ async def _t_send_group_record():
     try:
         with _workspace_file(".test_group_record.wav", audio) as path:
             ret = await provider.call(
-                "send_group_record", {"group_id": 123, "path": path}
+                "send_media", {"kind": "record", "target": "group:123", "source": path}
             )
-        assert "已发送语音到群 123" in ret, ret
+        assert "已发送[语音]到 group:123" in ret, ret
         assert len(bot_api.calls) == 1, bot_api.calls
         kind, gid, file_arg = bot_api.calls[0]
         assert kind == "group" and gid == "123", (kind, gid)
@@ -294,9 +294,9 @@ async def _t_send_private_record():
     try:
         with _workspace_file(".test_private_record.wav", audio) as path:
             ret = await provider.call(
-                "send_private_record", {"user_id": 456, "path": path}
+                "send_media", {"kind": "record", "target": "private:456", "source": path}
             )
-        assert "已发送语音给用户 456" in ret, ret
+        assert "已发送[语音]到 private:456" in ret, ret
         assert len(bot_api.calls) == 1, bot_api.calls
         kind, uid, file_arg = bot_api.calls[0]
         assert kind == "private" and uid == "456", (kind, uid)
@@ -314,8 +314,8 @@ async def _t_send_record_missing_file():
     provider, conn = await _make_provider(bot_api, memory)
     try:
         ret = await provider.call(
-            "send_group_record",
-            {"group_id": 1, "path": "/workspace/__not_exist__.wav"},
+            "send_media",
+            {"kind": "record", "target": "group:1", "source": "/workspace/__not_exist__.wav"},
         )
         data = json.loads(ret)
         assert data["ok"] is False, ret

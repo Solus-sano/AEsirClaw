@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 import frontmatter
 from mcp.server.fastmcp import FastMCP
@@ -47,24 +46,13 @@ def _events_to_messages(history: list) -> list[dict]:
     ]
 
 
-def _slice_history_by_before_range(
-    history: list, before_near: int, before_far: int
-) -> list:
-    """从最近 before_far 条消息中截取 [before_near, before_far] 区间（1-indexed，距现在条数）。"""
-    n = len(history)
-    start = max(0, n - before_far)
-    end = max(0, n - before_near + 1)
-    if start >= end:
-        return []
-    return history[start:end]
-
-
 def create_mcp_server(
     *,
     outputter: MessageOutputter,
     bot_api: BotAPI,
     memory: ShortTermMemory,
     bot_name: str = "Bot",
+    bot_qq: str | int | None = None,
     executor: BaseExecutor | None = None,
     scheduler: TaskScheduler | None = None,
     context_id: str | None = None,
@@ -92,269 +80,125 @@ def create_mcp_server(
 
     @mcp.tool()
     async def execute_task(command: str) -> str:
-        """在沙箱中执行 shell 命令。支持任意命令：python、ls、wget、curl、ffmpeg、apt install 等。
-        /skills/ 目录（只读）包含能力指南和预写脚本，/workspace/ 目录（可读写）是工作区。
-        stdout 和 stderr 将作为返回值。
-
-        常见用法:
-        - 运行 Python: python -c "print(1+1)"
-        - 运行脚本: python /skills/web/web_search/src/search.py "关键词"
-        - 下载文件: wget -O /workspace/file.png "https://example.com/image.png"
-        - 查看文件: ls /workspace/ 或 cat /skills/INDEX.md
-        - 安装依赖: pip install pandas
-        """
+        """在沙箱执行 shell 命令，返回 stdout/stderr。/skills 只读，/workspace 可读写。"""
         if executor is None:
             return json.dumps({"ok": False, "error": "沙箱执行器未初始化"}, ensure_ascii=False)
         return await executor.execute(command)
 
-    # ─── QQ 消息工具 ──────────────────────────────────────
+    # ─── QQ 工具：统一使用 group:ID / private:ID 定位会话 ───
+
+    def _resolve_target(target: str | None) -> tuple[str, str, str]:
+        resolved = context_id if target is None else target
+        kind, separator, identifier = (resolved or "").partition(":")
+        if (kind not in {"group", "private"} or not separator
+                or not identifier.isascii() or not identifier.isdecimal()
+                or int(identifier) <= 0):
+            raise ValueError("target 须为 group:正整数 或 private:正整数；省略时须有当前会话")
+        identifier = str(int(identifier))
+        return kind, identifier, f"{kind}:{identifier}"
+
+    def _error(message: str) -> str:
+        return json.dumps({"ok": False, "error": message}, ensure_ascii=False)
 
     @mcp.tool()
-    async def send_group_msg(group_id: int, messages: list[str]) -> str:
-        """向 QQ 群发送消息。messages 为分段文本列表，内部自动模拟打字延迟逐条发送。"""
-        await outputter.send_group(str(group_id), messages)
-        ctx = f"group:{group_id}"
-        for seg in messages:
-            _record_bot_msg(ctx, seg)
-        return f"已发送 {len(messages)} 条消息到群 {group_id}"
-
-    @mcp.tool()
-    async def send_private_msg(user_id: int, messages: list[str]) -> str:
-        """向 QQ 用户发送私聊消息。messages 为分段文本列表，内部自动模拟打字延迟。"""
-        await outputter.send_private(str(user_id), messages)
-        ctx = f"private:{user_id}"
-        for seg in messages:
-            _record_bot_msg(ctx, seg)
-        return f"已发送 {len(messages)} 条私聊消息给 {user_id}"
-
-    @mcp.tool()
-    async def send_group_record(group_id: int, path: str) -> str:
-        """向 QQ 群发送语音消息（以 base64 方式上传本地语音文件）。
-
-        path: /workspace/ 下的本地语音文件路径（如：tmp/record/***.wav）
-              一般会由 NapCat 自动转码，若失败请先用 execute_task 借助 ffmpeg 转码。
-        """
-        abs_path = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path}")
-        if not os.path.exists(abs_path):
-            return json.dumps(
-                {"ok": False, "error": f"语音文件不存在: {path}"}, ensure_ascii=False
-            )
-        with open(abs_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
-        await bot_api.send_group_record(group_id=str(group_id), file=f"base64://{encoded}")
-        ctx = f"group:{group_id}"
-        _record_bot_msg(ctx, "[语音]")
-        return f"已发送语音到群 {group_id}"
-
-    @mcp.tool()
-    async def send_private_record(user_id: int, path: str) -> str:
-        """向 QQ 用户发送私聊语音消息（以 base64 方式上传本地语音文件）。
-
-        path: /workspace/ 下的本地语音文件路径（如：tmp/record/***.wav）
-              一般会由 NapCat 自动转码，若失败请先用 execute_task 借助 ffmpeg 转码。
-        """
-        abs_path = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path}")
-        if not os.path.exists(abs_path):
-            return json.dumps(
-                {"ok": False, "error": f"语音文件不存在: {path}"}, ensure_ascii=False
-            )
-        with open(abs_path, "rb") as f:
-            encoded = base64.b64encode(f.read()).decode("utf-8")
-        await bot_api.send_private_record(user_id=str(user_id), file=f"base64://{encoded}")
-        ctx = f"private:{user_id}"
-        _record_bot_msg(ctx, "[语音]")
-        return f"已发送语音给用户 {user_id}"
-
-    @mcp.tool()
-    async def send_group_media(
-        group_id: int,
-        media_type: str,
-        path_or_url: str,
-        text: str = None,
+    async def send_message(
+        messages: list[str], target: str | None = None, forward: bool = False,
     ) -> str:
-        """向 QQ 群发送媒体内容，如果要发送的内容包含不是文本的其他模态内容，则必须使用此工具发送。
-        media_type: "image" | "file" | "video" 
-        path_or_url: 图片URL 或 /workspace/ 下的本地文件路径
-        text: 附带的文字说明（可选）
+        """发送文本。target 为 group:ID / private:ID，省略用当前会话。
+        messages 各项逐条发送到qq中；forward=true 时将messages中的多条消息合为一个转发消息块发送到qq中。
         """
-        # 判断是否是url
-        if not path_or_url.startswith("http"):
-            path_or_url = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path_or_url}")
-        ctx = f"group:{group_id}"
-        label = {"image": "[图片]", "file": "[文件]", "video": "[视频]"}.get(media_type, "")
-        if media_type == "image":
-            if text:
-                await bot_api.post_group_msg(group_id=str(group_id), text=text, image=path_or_url)
-            else:
-                await bot_api.post_group_msg(group_id=str(group_id), image=path_or_url)
-        elif media_type == "file":
-            await bot_api.post_group_file(group_id=str(group_id), file=path_or_url)
-        elif media_type == "video":
-            await bot_api.post_group_msg(group_id=str(group_id), video=path_or_url)
-        else:
-            return f"不支持的媒体类型: {media_type}"
-
-        content = f"{text} {label}" if text else label
-        _record_bot_msg(ctx, content)
-        return f"已发送{label}到群 {group_id}"
-    
-    @mcp.tool()
-    async def send_private_media(
-        user_id: int,
-        media_type: str,
-        path_or_url: str,
-        text: str = None,
-    ) -> str:
-        """向 QQ 用户发送媒体内容，如果要发送的内容包含不是文本的其他模态内容，则必须使用此工具发送。
-        注意先确认文件格式，必要时加上后缀
-        media_type: "image" | "file" | "video"
-        path_or_url: 图片URL 或 /workspace/ 下的本地文件路径
-        text: 附带的文字说明（可选）
-        """
-        if not path_or_url.startswith("http"):
-            path_or_url = os.path.join(os.path.abspath(_PROJECT_DIR), f".{path_or_url}")
-        ctx = f"private:{user_id}"
-        label = {"image": "[图片]", "file": "[文件]", "video": "[视频]"}.get(media_type, "")
-        if media_type == "image":
-            if text:
-                await bot_api.post_private_msg(user_id=str(user_id), text=text, image=path_or_url)
-            else:
-                await bot_api.post_private_msg(user_id=str(user_id), image=path_or_url)
-        elif media_type == "file":
-            await bot_api.post_private_file(user_id=str(user_id), file=path_or_url)
-        elif media_type == "video":
-            await bot_api.post_private_msg(user_id=str(user_id), video=path_or_url)
-        else:
-            return f"不支持的媒体类型: {media_type}"
-
-        content = f"{text} {label}" if text else label
-        _record_bot_msg(ctx, content)
-        return f"已发送{label}到用户 {user_id}"
-
-    @mcp.tool()
-    async def get_group_msg_history(
-        group_id: int,
-        count: int = 20,
-        before_near: int | None = None,
-        before_far: int | None = None,
-    ) -> str:
-        """
-        如果需要获取更多的群聊历史，可以调用此工具获取群聊历史消息记录。
-        group_id: 群聊 ID
-        count: 获取最近的消息数量，默认 20。仅在不指定 before_near / before_far 时生效。
-        before_near: 区间较近边界（距现在第几条），如 100 表示从第 100 条前开始（含）。
-        before_far: 区间较远边界（距现在第几条），如 200 表示到第 200 条前为止（含）。
-        指定 before_near 与 before_far 时，返回 [before_near, before_far] 区间内的消息
-        （例如 before_near=100, before_far=200 即第 100～200 条前的消息，共 101 条）。
-        返回 JSON 格式的消息列表，按时间从旧到新排列。
-        """
-        if (before_near is None) ^ (before_far is None):
-            return json.dumps(
-                {"ok": False, "error": "before_near 与 before_far 需同时指定或同时省略"},
-                ensure_ascii=False,
-            )
-        if before_near is not None and before_far is not None:
-            if before_near < 1 or before_far <= before_near:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "需满足 1 <= before_near < before_far",
-                    },
-                    ensure_ascii=False,
-                )
-            fetch_count = before_far
-        else:
-            fetch_count = count
-
-        history = await bot_api.get_group_msg_history(
-            group_id=str(group_id), count=fetch_count
-        )
-        if before_near is not None and before_far is not None:
-            history = _slice_history_by_before_range(
-                history, before_near, before_far
-            )
-        return json.dumps(_events_to_messages(history), ensure_ascii=False)
-    
-    @mcp.tool()
-    async def send_group_forward_msg(group_id: int, user_id: int, messages: list[str]) -> str:
-        """
-        向 QQ 群发送合并转发消息。
-        group_id: 群号
-        user_id: 发送者 QQ 号（用于显示转发节点头像）
-        messages: 转发内容列表，每个元素会作为合并转发中的一条文本消息
-        """
-        segments = [msg.strip() for msg in messages if msg and msg.strip()]
+        try:
+            kind, identifier, ctx = _resolve_target(target)
+        except ValueError as exc:
+            return _error(str(exc))
+        segments = [message for message in messages if message.strip()]
         if not segments:
-            return "转发内容不能为空"
-
-        forward_messages = [
-            {
-                "type": "node",
-                "data": {
-                    "name": bot_name,
-                    "uin": str(user_id),
-                    "content": [{"type": "text", "data": {"text": seg}}],
-                },
-            }
-            for seg in segments
-        ]
-
-        news = [s[:20] for s in segments[:4]]
-
-        await bot_api.send_group_forward_msg(
-            group_id=str(group_id),
-            messages=forward_messages,
-            news=news,
-            prompt="[合并转发]",
-            summary=f"查看{len(segments)}条转发消息",
-            source="机器人发送的合并转发消息",
-        )
-        _record_bot_msg(f"group:{group_id}", f"[合并转发] 共 {len(segments)} 条")
-        return f"已发送 {len(segments)} 条合并转发消息到群 {group_id}"
-    
-    @mcp.tool()
-    async def get_private_msg_history(
-        user_id: int,
-        count: int = 20,
-        before_near: int | None = None,
-        before_far: int | None = None,
-    ) -> str:
-        """
-        如果需要获取更多的私聊历史，可以调用此工具获取私聊历史消息记录。
-        user_id: 用户 ID
-        count: 获取最近的消息数量，默认 20。仅在不指定 before_near / before_far 时生效。
-        before_near: 区间较近边界（距现在第几条），如 100 表示从第 100 条前开始（含）。
-        before_far: 区间较远边界（距现在第几条），如 200 表示到第 200 条前为止（含）。
-        指定 before_near 与 before_far 时，返回 [before_near, before_far] 区间内的消息
-        （例如 before_near=100, before_far=200 即第 100～200 条前的消息，共 101 条）。
-        返回 JSON 格式的消息列表，按时间从旧到新排列。
-        """
-        if (before_near is None) ^ (before_far is None):
-            return json.dumps(
-                {"ok": False, "error": "before_near 与 before_far 需同时指定或同时省略"},
-                ensure_ascii=False,
+            return _error("消息内容不能为空")
+        if forward:
+            if bot_qq is None:
+                return _error("合并转发所需的机器人 QQ 号未初始化")
+            nodes = [
+                {"type": "node", "data": {
+                    "name": bot_name, "uin": str(bot_qq),
+                    "content": [{"type": "text", "data": {"text": segment}}],
+                }}
+                for segment in segments
+            ]
+            send = getattr(bot_api, f"send_{kind}_forward_msg")
+            await send(
+                **{("group_id" if kind == "group" else "user_id"): identifier},
+                messages=nodes, news=[s[:20] for s in segments[:4]],
+                prompt="[合并转发]", summary=f"查看{len(segments)}条转发消息",
+                source="机器人发送的合并转发消息",
             )
-        if before_near is not None and before_far is not None:
-            if before_near < 1 or before_far <= before_near:
-                return json.dumps(
-                    {
-                        "ok": False,
-                        "error": "需满足 1 <= before_near < before_far",
-                    },
-                    ensure_ascii=False,
-                )
-            fetch_count = before_far
+            _record_bot_msg(ctx, "[合并转发]\n" + "\n".join(segments))
         else:
-            fetch_count = count
+            await getattr(outputter, f"send_{kind}")(identifier, segments)
+            for segment in segments:
+                _record_bot_msg(ctx, segment)
+        return f"已发送 {len(segments)} 条{'合并转发' if forward else ''}消息到 {ctx}"
 
-        history = await bot_api.get_friend_msg_history(
-            user_id=str(user_id), message_seq=0, count=fetch_count
-        )
-        if before_near is not None and before_far is not None:
-            history = _slice_history_by_before_range(
-                history, before_near, before_far
-            )
-        return json.dumps(_events_to_messages(history), ensure_ascii=False)
+    @mcp.tool()
+    async def send_media(
+        kind: Literal["image", "file", "video", "record"],
+        source: str, target: str | None = None, caption: str | None = None,
+    ) -> str:
+        """发送媒体。source 为 /workspace/ 文件路径或 URL（语音仅本地文件）。
+        target 为 group:ID / private:ID，省略用当前会话；caption 为附言。
+        """
+        try:
+            chat_kind, identifier, ctx = _resolve_target(target)
+        except ValueError as exc:
+            return _error(str(exc))
+        is_url = source.startswith(("https://", "http://"))
+        if kind == "record" and is_url:
+            return _error("语音仅支持 /workspace/ 下的本地文件")
+        if not is_url:
+            workspace = (_PROJECT_DIR / "workspace").resolve()
+            path = (_PROJECT_DIR / source.lstrip("/")).resolve()
+            if not source.startswith("/workspace/") or not path.is_relative_to(workspace):
+                return _error("本地文件须位于 /workspace/ 下")
+            if not path.is_file():
+                return _error(f"{'语音' if kind == 'record' else '媒体'}文件不存在: {source}")
+            source = str(path)
+        recipient = {("group_id" if chat_kind == "group" else "user_id"): identifier}
+        label = {"image": "[图片]", "file": "[文件]", "video": "[视频]", "record": "[语音]"}[kind]
+        if kind == "record":
+            encoded = base64.b64encode(Path(source).read_bytes()).decode("utf-8")
+            await getattr(bot_api, f"send_{chat_kind}_record")(**recipient, file=f"base64://{encoded}")
+        elif kind == "file":
+            await getattr(bot_api, f"post_{chat_kind}_file")(**recipient, file=source)
+        else:
+            kwargs = {kind: source}
+            if caption:
+                kwargs["text"] = caption
+            await getattr(bot_api, f"post_{chat_kind}_msg")(**recipient, **kwargs)
+        _record_bot_msg(ctx, f"{caption} {label}" if caption and kind in {"image", "video"} else label)
+        # 文件和语音不能内嵌附言，成功发送后再发文本。
+        if caption and kind in {"file", "record"}:
+            await getattr(outputter, f"send_{chat_kind}")(identifier, [caption])
+            _record_bot_msg(ctx, caption)
+        return f"已发送{label}到 {ctx}"
+
+    @mcp.tool()
+    async def get_history(
+        target: str | None = None, limit: int = 20, offset: int = 0,
+    ) -> str:
+        """读取历史，按旧到新返回。跳过最近 offset 条，再取最多 limit 条。
+        target 为 group:ID / private:ID，省略用当前会话。
+        """
+        try:
+            kind, identifier, _ = _resolve_target(target)
+        except ValueError as exc:
+            return _error(str(exc))
+        if limit < 1 or offset < 0:
+            return _error("limit 须大于 0，offset 须不小于 0")
+        if kind == "group":
+            history = await bot_api.get_group_msg_history(group_id=identifier, count=offset + limit)
+        else:
+            history = await bot_api.get_friend_msg_history(user_id=identifier, message_seq=0, count=offset + limit)
+        end = max(0, len(history) - offset)
+        return json.dumps(_events_to_messages(history[max(0, end - limit):end]), ensure_ascii=False)
 
     # ─── 技能查询工具 ──────────────────────────────────────
 
@@ -475,7 +319,7 @@ def create_mcp_server(
             但不能发消息、不能再派发 subagent。可在一轮内派发多个 dispatch_subagent，
             它们会并行执行。
 
-            task: 对子任务的完整描述。务必写清数据指针（如"总结 group:123 最近 200 条里第 0-100 条"），
+            task: 对子任务的完整描述。务必写清数据指针（如"总结 group:123 的历史，limit=100、offset=100"），
                   以便 subagent 自行拉取数据，避免你把原始数据读进自己的上下文。
             """
             return await subagent_runner.run(task)

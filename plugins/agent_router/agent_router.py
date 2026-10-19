@@ -184,9 +184,9 @@ class AgentRouterPlugin(NcatBotPlugin):
         is_at_me = self._check_at_me(event)
 
         # @ 强制触发：跳过防抖
-        if is_at_me:
-            await self._safe_handle(context_id, is_at_me=True, message=text)
-            return
+        # if is_at_me:
+        #     await self._safe_handle(context_id, is_at_me=True, message=text)
+        #     return
 
         # 普通消息：走防抖
         self.debouncer.schedule(
@@ -339,6 +339,7 @@ class AgentRouterPlugin(NcatBotPlugin):
             bot_api=self.api,
             memory=self.memory,
             bot_name=bot_name,
+            bot_qq=self.bot_qq,
             executor=self.executor,
             scheduler=self.scheduler,
             context_id=context_id,

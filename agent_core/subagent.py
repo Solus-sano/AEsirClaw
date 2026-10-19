@@ -25,8 +25,7 @@ if TYPE_CHECKING:
 # subagent 允许使用的工具（白名单，只读/调研类）
 DEFAULT_SUBAGENT_TOOLS: set[str] = {
     "execute_task",
-    "get_group_msg_history",
-    "get_private_msg_history",
+    "get_history",
     "get_skill",
 }
 

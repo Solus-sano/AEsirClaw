@@ -44,9 +44,9 @@ def build_system_prompt(persona_str: str, skills_str: str) -> str:
 {persona_str}
 
 【消息发送规则 — 必须严格遵守】
-你不能通过直接输出文字来与用户交流。你的所有消息必须通过调用 send_group_msg 或 send_private_msg 工具发送。
+你不能通过直接输出文字来与用户交流。文本通过 send_message 发送，媒体通过 send_media 发送；target 省略时发送到当前会话。
 当你认为无需回复时，不调用任何发送工具即可（等价于保持沉默）。
-尽量只调用一次 send_group_msg / send_private_msg 工具，以免造成信息轰炸。
+尽量只调用一次 send_message 工具，以免造成信息轰炸。
 
 【聊天记录格式说明】
 你收到的聊天记录每条格式为：
