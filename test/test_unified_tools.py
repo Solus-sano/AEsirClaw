@@ -2,9 +2,10 @@
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -14,7 +15,7 @@ from agent_core.tools.mcp_tools import create_mcp_server
 from agent_core.tools.provider import McpConnection, McpToolProvider, FilteredToolProvider
 
 
-async def main():
+async def run_checks(root):
     names = ["send_group_forward_msg", "send_private_forward_msg", "post_group_msg",
              "post_private_msg", "post_group_file", "post_private_file",
              "get_group_msg_history", "get_friend_msg_history"]
@@ -59,11 +60,39 @@ async def main():
         api.get_friend_msg_history.return_value = history
         for target in ["group:123", "private:456"]:
             result = json.loads(await provider.call("get_history", {"target": target, "limit": 3, "offset": 2}))
-            assert [m["content"] for m in result] == ["5", "6", "7"]
+            assert result == {"ok": True, "path": "/workspace/tmp_history.jsonl", "count": 3, "target": target}
+            rows = [json.loads(line) for line in (root / "workspace/tmp_history.jsonl").read_text().splitlines()]
+            assert [m["content"] for m in rows] == ["5", "6", "7"]
             result = json.loads(await provider.call("get_history", {"target": target, "limit": 3, "offset": 20}))
-            assert result == []
+            assert result["count"] == 0
+            assert (root / "workspace/tmp_history.jsonl").read_bytes() == b""
         result = json.loads(await provider.call("get_history", {"limit": 2}))
-        assert [m["content"] for m in result] == ["8", "9"]
+        assert result["count"] == 2 and result["target"] == "group:123"
+        rows = [json.loads(line) for line in (root / "workspace/tmp_history.jsonl").read_text().splitlines()]
+        assert [m["content"] for m in rows] == ["8", "9"]
+
+        history[-1].raw_message = "你好\n第二行"
+        for output_path in ["stats/history.jsonl", "/workspace/stats/history.jsonl"]:
+            result = json.loads(await provider.call("get_history", {"limit": 1, "output_path": output_path}))
+            assert result["path"] == "/workspace/stats/history.jsonl" and result["count"] == 1
+            lines = (root / "workspace/stats/history.jsonl").read_text().splitlines()
+            assert len(lines) == 1
+            assert json.loads(lines[0]) == {"sender": "A", "content": "你好\n第二行", "time": 9}
+            assert "你好" not in json.dumps(result, ensure_ascii=False)
+        (root / "outside.jsonl").write_text("preserve")
+        (root / "workspace/link.jsonl").symlink_to(root / "outside.jsonl")
+        before_calls = api.get_group_msg_history.await_count
+        for output_path in ["../outside.jsonl", "/workspace/../outside.jsonl", "/workspace/link.jsonl", "/workspace/stats", ""]:
+            result = json.loads(await provider.call("get_history", {"output_path": output_path}))
+            assert result["ok"] is False
+        assert api.get_group_msg_history.await_count == before_calls
+        assert (root / "outside.jsonl").read_text() == "preserve"
+        original = (root / "workspace/tmp_history.jsonl").read_bytes()
+        with patch("agent_core.tools.mcp_tools.os.replace", side_effect=OSError("test write failure")):
+            result = json.loads(await provider.call("get_history", {}))
+            assert result["ok"] is False
+        assert (root / "workspace/tmp_history.jsonl").read_bytes() == original
+        assert not list((root / "workspace").glob(".history-*.tmp"))
         for args in [{"limit": 0}, {"offset": -1}]:
             assert json.loads(await provider.call("get_history", args))["ok"] is False
 
@@ -82,6 +111,13 @@ async def main():
     finally:
         await conn.aclose()
     print("ALL UNIFIED TOOL TESTS PASSED")
+
+
+async def main():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        with patch("agent_core.tools.mcp_tools._PROJECT_DIR", root):
+            await run_checks(root)
 
 
 if __name__ == "__main__":

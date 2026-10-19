@@ -6,6 +6,8 @@ import asyncio
 import base64
 import io
 import json
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -215,12 +217,26 @@ def create_mcp_server(
     @mcp.tool()
     async def get_history(
         target: str | None = None, limit: int = 20, offset: int = 0,
+        output_path: str = "/workspace/tmp_history.jsonl",
     ) -> str:
-        """读取历史，按旧到新返回。跳过最近 offset 条，再取最多 limit 条。
-        target 为 group:ID / private:ID，省略用当前会话。
+        """跳过最近 offset 条，取最多 limit 条，按旧到新覆盖写入工作区 JSONL。
+        target 为 group:ID / private:ID，省略用当前会话。output_path 可为工作区相对路径。
+        仅返回 path/count，获取详细内容可通过 execute_task 读取文件。
         """
         try:
-            kind, identifier, _ = _resolve_target(target)
+            kind, identifier, ctx = _resolve_target(target)
+            workspace = (_PROJECT_DIR / "workspace").resolve()
+            if output_path.startswith("/workspace/"):
+                destination = _PROJECT_DIR / output_path.lstrip("/")
+            else:
+                destination = Path(output_path)
+                if not destination.is_absolute():
+                    destination = workspace / destination
+            destination = destination.resolve()
+            if not destination.is_relative_to(workspace) or destination == workspace:
+                return _error("output_path 须为 /workspace/ 下的文件路径")
+            if destination.is_dir():
+                return _error("output_path 不能是目录")
         except ValueError as exc:
             return _error(str(exc))
         if limit < 1 or offset < 0:
@@ -230,7 +246,34 @@ def create_mcp_server(
         else:
             history = await bot_api.get_friend_msg_history(user_id=identifier, message_seq=0, count=offset + limit)
         end = max(0, len(history) - offset)
-        return json.dumps(_events_to_messages(history[max(0, end - limit):end]), ensure_ascii=False)
+        rows = _events_to_messages(history[max(0, end - limit):end])
+
+        def write_history() -> None:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                # 同目录临时文件 + 替换，读者不会看到写到一半的 JSONL。
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=destination.parent,
+                    prefix=".history-", suffix=".tmp", delete=False,
+                ) as stream:
+                    temporary = Path(stream.name)
+                    for row in rows:
+                        stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+                os.replace(temporary, destination)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+
+        try:
+            await asyncio.to_thread(write_history)
+        except OSError as exc:
+            return _error(f"历史文件写入失败: {exc}")
+        return json.dumps({
+            "ok": True,
+            "path": "/workspace/" + destination.relative_to(workspace).as_posix(),
+            "count": len(rows), "target": ctx,
+        }, ensure_ascii=False)
 
     # ─── 技能查询工具 ──────────────────────────────────────
 
